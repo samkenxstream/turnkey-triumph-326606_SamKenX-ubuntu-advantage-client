@@ -86,7 +86,7 @@ class TestESMRepoPinPriority:
         """
         m_is_lts.return_value = True
         m_get_platform_info.return_value = {"series": series}
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         m_cfg.return_value = cfg
 
         inst = ESMAppsEntitlement(cfg)
@@ -153,7 +153,7 @@ class TestESMDisableAptAuthOnly:
     ):
         m_is_lts.return_value = is_lts
         m_get_platform_info.return_value = {"series": series}
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         if cfg_allow_beta:
             cfg.override_features({"allow_beta": cfg_allow_beta})
         m_cfg.return_value = cfg
@@ -176,8 +176,10 @@ class TestESMInfraEntitlementEnable:
     @pytest.mark.parametrize(
         "esm_cls", [ESMAppsEntitlement, ESMInfraEntitlement]
     )
+    @mock.patch(M_REPOPATH + "os.getuid", return_value=0)
     def test_enable_configures_apt_sources_and_auth_files(
         self,
+        m_getuid,
         m_setup_apt_proxy,
         m_update_apt_and_motd_msgs,
         m_validate_proxy,
@@ -296,8 +298,10 @@ class TestESMInfraEntitlementEnable:
             mock.call(entitlement.cfg)
         ] == m_update_apt_and_motd_msgs.call_args_list
 
+    @mock.patch(M_REPOPATH + "os.getuid", return_value=0)
     def test_enable_cleans_up_apt_sources_and_auth_files_on_error(
         self,
+        m_getuid,
         _m_setup_apt_proxy,
         _m_update_apt_and_motd_msg,
         m_validate_proxy,

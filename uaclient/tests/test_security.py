@@ -1503,10 +1503,10 @@ A fix is available in Ubuntu standard updates.\n"""
         m_check_subscription_expired.return_value = False
 
         def fake_attach(args, cfg):
-            cfg.for_attached_machine()
+            cfg.attached = True
             return 0
 
-        m_action_attach.side_effect = fake_attach
+        m_action_attach.side_effect = fake_attach  # TODO: Check this out
 
         cfg = FakeConfig()
         with mock.patch("uaclient.util._subp", side_effect=_subp):
@@ -1661,7 +1661,7 @@ A fix is available in Ubuntu standard updates.\n"""
         m_get_cloud_type.return_value = ("cloud", None)
 
         def fake_attach(args, cfg):
-            cfg.for_attached_machine()
+            cfg.attached = True
             return 0
 
         m_action_attach.side_effect = fake_attach
@@ -1771,8 +1771,7 @@ A fix is available in Ubuntu standard updates.\n"""
             return_value="esm-infra"
         )
 
-        cfg = FakeConfig()
-        cfg.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         with mock.patch(
             "uaclient.entitlements.entitlement_factory",
             return_value=m_entitlement_cls,
@@ -1860,8 +1859,7 @@ A fix is available in Ubuntu standard updates.\n"""
             return_value="esm-infra"
         )
 
-        cfg = FakeConfig()
-        cfg.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         with mock.patch(
             "uaclient.entitlements.entitlement_factory",
             return_value=m_entitlement_cls,
@@ -1948,14 +1946,14 @@ A fix is available in Ubuntu standard updates.\n"""
         m_cli_attach.return_value = 0
         m_is_pocket_beta_service.return_value = False
 
-        cfg = FakeConfig()
-        cfg.for_attached_machine(
-            machine_token={
+        info = {
+            "machine_token": {
                 "machineTokenInfo": {
                     "contractInfo": {"effectiveTo": "1999-12-01T00:00:00Z"}
                 }
             }
-        )
+        }
+        cfg = FakeConfig(attached=True, additional_info=info)
         with mock.patch("uaclient.util._subp", side_effect=_subp):
             with mock.patch("uaclient.util.sys") as m_sys:
                 m_stdout = mock.MagicMock()
@@ -2019,14 +2017,14 @@ A fix is available in Ubuntu standard updates.\n"""
         m_get_cloud_type.return_value = ("cloud", None)
         m_is_pocket_beta_service.return_value = False
 
-        cfg = FakeConfig()
-        cfg.for_attached_machine(
-            machine_token={
+        info = {
+            "machine_token": {
                 "machineTokenInfo": {
                     "contractInfo": {"effectiveTo": "1999-12-01T00:00:00Z"}
                 }
             }
-        )
+        }
+        cfg = FakeConfig(attached=True, additional_info=info)
 
         with mock.patch("uaclient.util._subp", side_effect=_subp):
             with mock.patch("uaclient.util.sys") as m_sys:

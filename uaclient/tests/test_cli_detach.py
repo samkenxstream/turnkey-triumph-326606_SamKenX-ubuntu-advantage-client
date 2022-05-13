@@ -37,7 +37,7 @@ class TestActionDetach:
         m_getuid.return_value = 1
         args = mock.MagicMock()
 
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         with pytest.raises(exceptions.NonRootUserError):
             action_detach(args, cfg=cfg)
 
@@ -109,7 +109,7 @@ class TestActionDetach:
     ):
         """Check when an operation holds a lock file, detach cannot run."""
         m_getuid.return_value = 0
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         args = mock.MagicMock()
         with open(cfg.data_path("lock"), "w") as stream:
             stream.write("123:ua enable")
@@ -174,7 +174,7 @@ class TestActionDetach:
         #                   to be disabled by the action
         m_getuid.return_value = 0
 
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         fake_client = FakeContractClient(cfg)
         m_client.return_value = fake_client
 
@@ -220,7 +220,7 @@ class TestActionDetach:
                 mock.call(cfg)
             ] == m_update_apt_and_motd_msgs.call_args_list
 
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         fake_stdout = io.StringIO()
         # On json response, we will never prompt the user
         m_prompt.return_value = True
@@ -257,7 +257,7 @@ class TestActionDetach:
         m_getuid.return_value = 0
         m_entitlements.ENTITLEMENT_CLASSES = []
 
-        fake_client = FakeContractClient(FakeConfig.for_attached_machine())
+        fake_client = FakeContractClient(FakeConfig(attached=True))
         m_client.return_value = fake_client
 
         m_cfg = mock.MagicMock()
@@ -285,7 +285,7 @@ class TestActionDetach:
         m_getuid.return_value = 0
         m_entitlements.ENTITLEMENT_CLASSES = []
 
-        fake_client = FakeContractClient(FakeConfig.for_attached_machine())
+        fake_client = FakeContractClient(FakeConfig(attached=True))
         m_client.return_value = fake_client
 
         m_cfg = mock.MagicMock()
@@ -314,7 +314,7 @@ class TestActionDetach:
         m_getuid.return_value = 0
         m_entitlements.ENTITLEMENT_CLASSES = []
 
-        fake_client = FakeContractClient(FakeConfig.for_attached_machine())
+        fake_client = FakeContractClient(FakeConfig(attached=True))
         m_client.return_value = fake_client
 
         m_cfg = mock.MagicMock()
@@ -377,7 +377,7 @@ class TestActionDetach:
         m_getuid.return_value = 0
         m_entitlements.ENTITLEMENT_CLASSES = classes
 
-        fake_client = FakeContractClient(FakeConfig.for_attached_machine())
+        fake_client = FakeContractClient(FakeConfig(attached=True))
         m_client.return_value = fake_client
 
         m_cfg = mock.MagicMock()
@@ -392,7 +392,7 @@ class TestActionDetach:
         assert expected_message in out
         assert [mock.call(m_cfg)] == m_update_apt_and_motd_msgs.call_args_list
 
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         fake_stdout = io.StringIO()
         with contextlib.redirect_stdout(fake_stdout):
             with mock.patch.object(

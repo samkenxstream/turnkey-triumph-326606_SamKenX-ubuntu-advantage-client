@@ -107,8 +107,7 @@ def entitlement_factory(tmpdir):
             if cfg_extension is not None:
                 cfg_arg.update(cfg_extension)
             cfg = config.UAConfig(cfg=cfg_arg)
-            cfg.write_cache(
-                "machine-token",
+            cfg.machine_token_write(
                 machine_token(
                     cls.name,
                     affordances=affordances,

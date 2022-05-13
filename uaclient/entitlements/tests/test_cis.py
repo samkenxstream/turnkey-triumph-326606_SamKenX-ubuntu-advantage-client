@@ -36,6 +36,7 @@ class TestCISEntitlementCanEnable:
 
 
 class TestCISEntitlementEnable:
+    @mock.patch(M_REPOPATH + "os.getuid", return_value=0)
     @mock.patch("uaclient.apt.run_apt_cache_policy_command")
     @mock.patch("uaclient.apt.setup_apt_proxy")
     @mock.patch("uaclient.util.should_reboot")
@@ -48,6 +49,7 @@ class TestCISEntitlementEnable:
         m_should_reboot,
         m_setup_apt_proxy,
         m_apt_policy,
+        m_getuid,
         capsys,
         entitlement,
     ):

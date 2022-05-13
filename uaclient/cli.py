@@ -1232,6 +1232,7 @@ def _detach(cfg: config.UAConfig, assume_yes: bool) -> int:
         _perform_disable(ent, cfg, assume_yes=assume_yes, update_status=False)
 
     cfg.delete_cache()
+    cfg.machine_token_delete()
     daemon.start()
     update_apt_and_motd_messages(cfg)
     event.info(messages.DETACH_SUCCESS)
@@ -1852,9 +1853,18 @@ def main_error_handler(func):
 
 @main_error_handler
 def main(sys_argv=None):
+    cfg_override = None
+    if sys_argv:
+        cfg_found = False
+        for arg in sys_argv:
+            if isinstance(arg, dict):
+                cfg_found = True
+                cfg_override = arg
+        if cfg_found:
+            sys_argv.remove(cfg_override)
     if not sys_argv:
         sys_argv = sys.argv
-    cfg = config.UAConfig()
+    cfg = config.UAConfig(cfg=cfg_override)
     parser = get_parser(cfg=cfg)
     cli_arguments = sys_argv[1:]
     if not cli_arguments:

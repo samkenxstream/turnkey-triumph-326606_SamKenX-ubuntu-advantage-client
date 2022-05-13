@@ -95,7 +95,7 @@ def concrete_entitlement_factory(tmpdir):
                 }
             },
         }
-        cfg.write_cache("machine-token", machineToken)
+        cfg.machine_token_write(machineToken)
 
         if feature_overrides:
             cfg.cfg.update({"features": feature_overrides})

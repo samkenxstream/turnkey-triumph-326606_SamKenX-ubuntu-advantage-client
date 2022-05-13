@@ -261,10 +261,11 @@ class TestFIPSEntitlementCanEnable:
 
 
 class TestFIPSEntitlementEnable:
+    @mock.patch(M_REPOPATH + "os.getuid", return_value=0)
     @mock.patch("uaclient.apt.setup_apt_proxy")
     @mock.patch(M_PATH + "get_cloud_type", return_value=("", None))
     def test_enable_configures_apt_sources_and_auth_files(
-        self, _m_get_cloud_type, m_setup_apt_proxy, entitlement
+        self, _m_get_cloud_type, m_setup_apt_proxy, m_getuid, entitlement
     ):
         """When entitled, configure apt repo auth token, pinning and url."""
         patched_packages = ["a", "b"]

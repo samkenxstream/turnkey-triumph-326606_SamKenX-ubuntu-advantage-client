@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
 
 import yaml
 
-from uaclient import apt, event_logger, exceptions, messages, snap, util
+from uaclient import apt, event_logger, exceptions, files, messages, snap, util
 from uaclient.defaults import (
     BASE_CONTRACT_URL,
     BASE_SECURITY_URL,
@@ -78,7 +78,6 @@ class UAConfig:
     data_paths = {
         "instance-id": DataPath("instance-id", True, False),
         "machine-access-cis": DataPath("machine-access-cis.json", True, False),
-        "machine-token": DataPath("machine-token.json", True, False),
         "lock": DataPath("lock", True, False),
         "status-cache": DataPath("status.json", False, False),
         "notices": DataPath("notices.json", False, False),
@@ -114,6 +113,7 @@ class UAConfig:
             self.cfg = parse_config(self.cfg_path)
 
         self.series = series
+        self.machine_token_file = files.MachineTokenFile(self.cfg)
 
     @property
     def accounts(self):
@@ -470,7 +470,10 @@ class UAConfig:
     def machine_token(self):
         """Return the machine-token if cached in the machine token response."""
         if not self._machine_token:
-            raw_machine_token = self.read_cache("machine-token")
+            root_mode = False
+            if os.getuid() == 0:
+                root_mode = True
+            raw_machine_token = self.machine_token_file.read(root_mode)
 
             machine_token_overlay_path = self.features.get(
                 "machine_token_overlay"
@@ -577,13 +580,18 @@ class UAConfig:
             raise RuntimeError(
                 "Invalid or empty key provided to delete_cache_key"
             )
-        if key.startswith("machine-access") or key == "machine-token":
+        if key.startswith("machine-access"):
             self._entitlements = None
             self._machine_token = None
         elif key == "lock":
             self.remove_notice("", "Operation in progress.*")
         cache_path = self.data_path(key)
         self._perform_delete(cache_path)
+
+    def machine_token_delete(self):
+        self._entitlements = None
+        self._machine_token = None
+        self.machine_token_file.delete()
 
     def delete_cache(self, delete_permanent: bool = False):
         """
@@ -615,7 +623,7 @@ class UAConfig:
             os.makedirs(data_dir)
             if os.path.basename(data_dir) == PRIVATE_SUBDIR:
                 os.chmod(data_dir, 0o700)
-        if key.startswith("machine-access") or key == "machine-token":
+        if key.startswith("machine-access"):
             self._machine_token = None
             self._entitlements = None
         elif key == "lock":
@@ -631,6 +639,11 @@ class UAConfig:
             if not self.data_paths[key].private:
                 mode = 0o644
         util.write_file(filepath, content, mode=mode)
+
+    def machine_token_write(self, content: Any):
+        self._machine_token = None
+        self._entitlements = None
+        self.machine_token_file.write(content)
 
     def process_config(self):
         for prop in (

@@ -50,7 +50,7 @@ class TestGetContractExpiryStatus:
         """Return a tuple of ContractExpiryStatus and remaining_days"""
         now = datetime.datetime.utcnow()
         expire_date = now + datetime.timedelta(days=contract_remaining_days)
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         m_token = cfg.machine_token
         m_token["machineTokenInfo"]["contractInfo"][
             "effectiveTo"
@@ -114,7 +114,7 @@ class TestWriteAPTAndMOTDTemplates:
             contract_expiry_status,
             -12355,  # unused in this test
         )
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         msg_dir = os.path.join(cfg.data_dir, "messages")
         os.makedirs(msg_dir)
 
@@ -200,7 +200,7 @@ class TestWriteAPTAndMOTDTemplates:
 
         m_entitlement_factory.side_effect = factory_side_effect
 
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         os.makedirs(os.path.join(cfg.data_dir, "messages"))
         if cfg_allow_beta:
             cfg.override_features({"allow_beta": cfg_allow_beta})
@@ -345,7 +345,7 @@ class Test_WriteESMServiceAPTMsgTemplates:
         motd_pkgs_file = tmpdir.join("motd-pkgs-msg")
         motd_no_pkgs_file = tmpdir.join("motd-no-pkgs-msg")
         _write_esm_service_msg_templates(
-            FakeConfig.for_attached_machine(),
+            FakeConfig(attached=True),
             m_ent_obj,
             contract_expiry,
             21,
@@ -448,7 +448,7 @@ class Test_WriteESMServiceAPTMsgTemplates:
 
         now = datetime.datetime.utcnow()
         expire_date = now + datetime.timedelta(days=remaining_days)
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         m_token = cfg.machine_token
         m_token["machineTokenInfo"]["contractInfo"][
             "effectiveTo"
@@ -591,7 +591,7 @@ class TestWriteESMAnnouncementMessage:
         get_platform_info.return_value = {"series": series, "release": release}
         util.is_active_esm.return_value = is_active_esm
 
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         msg_dir = os.path.join(cfg.data_dir, "messages")
         os.makedirs(msg_dir)
         esm_news_path = os.path.join(msg_dir, "motd-esm-announce")
@@ -657,7 +657,7 @@ class TestUpdateAPTandMOTDMessages:
         get_platform_info.return_value = {"series": series}
         util_is_lts.return_value = is_lts
         is_active_esm.return_value = esm_active
-        cfg = FakeConfig.for_attached_machine()
+        cfg = FakeConfig(attached=True)
         if cfg_allow_beta:
             cfg.override_features({"allow_beta": cfg_allow_beta})
         msg_dir = os.path.join(cfg.data_dir, "messages")

@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from uaclient import (
@@ -49,7 +50,7 @@ class UAContractClient(serviceclient.UAServiceClient):
         machine_token, _headers = self.request_url(
             API_V1_CONTEXT_MACHINE_TOKEN, data=data, headers=headers
         )
-        self.cfg.write_cache("machine-token", machine_token)
+        self.cfg.machine_token_write(machine_token)
 
         util.get_machine_id.cache_clear()
         machine_id = machine_token.get("machineTokenInfo", {}).get(
@@ -166,8 +167,10 @@ class UAContractClient(serviceclient.UAServiceClient):
         # a full `activityInfo` object which belongs at the root of
         # `machine-token.json`
         if response:
-
-            machine_token = self.cfg.read_cache("machine-token")
+            root_mode = False
+            if os.getuid() == 0:
+                root_mode = True
+            machine_token = self.cfg.machine_token_file.read(root_mode)
             # The activity information received as a response here
             # will not provide the information inside an activityInfo
             # structure. However, this structure will be reflected when
@@ -175,7 +178,7 @@ class UAContractClient(serviceclient.UAServiceClient):
             # Because of that, we will store the response directly on
             # the activityInfo key
             machine_token["activityInfo"] = response
-            self.cfg.write_cache("machine-token", machine_token)
+            self.cfg.machine_token_write(machine_token)
 
     def get_updated_contract_info(
         self,
@@ -243,7 +246,7 @@ class UAContractClient(serviceclient.UAServiceClient):
         if headers.get("expires"):
             response["expires"] = headers["expires"]
         if not detach:
-            self.cfg.write_cache("machine-token", response)
+            self.cfg.machine_token_write(response)
             util.get_machine_id.cache_clear()
             machine_id = response.get("machineTokenInfo", {}).get(
                 "machineId", data.get("machineId")

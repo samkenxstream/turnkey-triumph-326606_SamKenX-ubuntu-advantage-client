@@ -295,7 +295,6 @@ class UAEntitlement(metaclass=abc.ABCMeta):
             (True, None) if can enable
             (False, CanEnableFailure) if can't enable
         """
-
         if self.is_access_expired():
             logging.debug(
                 "Updating contract on service '%s' expiry", self.name
