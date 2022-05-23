@@ -355,6 +355,15 @@ remove_old_systemd_timers() {
     fi
 }
 
+remove_old_config_fields() {
+    PREVIOUS_PKG_VER="$1"
+    if dpkg --compare-versions "$PREVIOUS_PKG_VER" le "27.8"; then
+        if grep -q "^license_check_log_file:" /etc/ubuntu-advantage/uaclient.conf; then
+            sed -i '/^license_check_log_file:.*$/d' /etc/ubuntu-advantage/uaclient.conf || true
+        fi
+    fi
+}
+
 case "$1" in
     configure)
       PREVIOUS_PKG_VER=$2
@@ -425,6 +434,7 @@ case "$1" in
       rm_old_license_check_marker
       disable_new_timer_if_old_timer_already_disabled $PREVIOUS_PKG_VER
       remove_old_systemd_timers
+      remove_old_config_fields "$PREVIOUS_PKG_VER"
       /usr/lib/ubuntu-advantage/cloud-id-shim.sh || true
       ;;
 esac
