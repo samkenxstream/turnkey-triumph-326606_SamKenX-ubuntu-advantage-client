@@ -1,0 +1,22 @@
+#!/bin/sh
+
+set -e
+
+remove_old_config_fields() {
+    PREVIOUS_PKG_VER="$1"
+    if dpkg --compare-versions "$PREVIOUS_PKG_VER" le "27.8"; then
+        if grep -q "^license_check_log_file:" /etc/ubuntu-advantage/uaclient.conf; then
+            sed -i '/^license_check_log_file:.*$/d' /etc/ubuntu-advantage/uaclient.conf || true
+        fi
+    fi
+}
+
+case "$1" in
+    upgrade)
+      PREVIOUS_PKG_VER=$2
+      remove_old_config_fields "$PREVIOUS_PKG_VER"
+      ;;
+esac
+
+#DEBHELPER#
+exit 0
