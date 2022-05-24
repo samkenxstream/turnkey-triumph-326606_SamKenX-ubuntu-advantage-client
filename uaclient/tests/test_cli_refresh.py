@@ -5,7 +5,7 @@ from uaclient import exceptions, messages
 from uaclient.cli import action_refresh, main
 
 HELP_OUTPUT = """\
-usage: ua refresh [contract|config] [flags]
+usage: pro refresh [contract|config] [flags]
 
 Refresh existing Ubuntu Advantage contract and update services.
 
