@@ -2,7 +2,7 @@
 behave
 jsonschema
 PyHamcrest
-pycloudlib @ git+https://github.com/canonical/pycloudlib.git@db36ef2dfc0a8d916c0e2c1794d7228d49de9192
+pycloudlib @ git+https://github.com/canonical/pycloudlib.git@e7c4a42eb98a914b084b253c3f96c960de42e8fa
 toml==0.10
 
 

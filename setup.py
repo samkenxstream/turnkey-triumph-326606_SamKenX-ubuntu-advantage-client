@@ -5,7 +5,7 @@ import glob
 
 import setuptools
 
-from uaclient import defaults, version
+from uaclient import defaults
 
 NAME = "ubuntu-advantage-tools"
 
@@ -30,14 +30,6 @@ def split_link_deps(reqs_filename):
 TEST_REQUIRES, TEST_LINKS = split_link_deps("test-requirements.txt")
 
 
-def _get_version():
-    parts = version.get_version().split("-")
-    if len(parts) == 1:
-        return parts[0]
-    major_minor, _subrev, _commitish = parts
-    return major_minor
-
-
 def _get_data_files():
     return [
         ("/etc/ubuntu-advantage", ["uaclient.conf", "help_data.yaml"]),
@@ -50,12 +42,18 @@ def _get_data_files():
         ),
         (defaults.CONFIG_DEFAULTS["data_dir"], []),
         ("/lib/systemd/system", glob.glob("systemd/*")),
+        (
+            "/usr/share/apport/package-hooks",
+            ["apport/source_ubuntu-advantage-tools.py"],
+        ),
     ]
 
 
 setuptools.setup(
     name=NAME,
-    version=_get_version(),
+    # This version does not matter, it is not used anywhere but in unit tests
+    # AND IT IS OVER 8000
+    version="8001",
     packages=setuptools.find_packages(
         exclude=[
             "*.testing",
@@ -72,7 +70,7 @@ setuptools.setup(
     extras_require=dict(test=TEST_REQUIRES),
     author="Ubuntu Server Team",
     author_email="ubuntu-server@lists.ubuntu.com",
-    description=("Manage Ubuntu Advantage support entitlements"),
+    description=("Manage Ubuntu Pro support entitlements"),
     license="GPLv3",
     url="https://ubuntu.com/support",
     entry_points={

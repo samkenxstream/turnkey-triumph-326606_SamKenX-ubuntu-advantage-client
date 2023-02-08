@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import re
 import socket
 import stat
 import sys
@@ -19,10 +20,10 @@ from uaclient.cli import (
     assert_not_attached,
     assert_root,
     get_parser,
-    get_valid_entitlement_names,
     main,
     setup_logging,
 )
+from uaclient.entitlements import get_valid_entitlement_names
 from uaclient.exceptions import (
     AlreadyAttachedError,
     LockHeldError,
@@ -30,6 +31,7 @@ from uaclient.exceptions import (
     UnattachedError,
     UserFacingError,
 )
+from uaclient.files.notices import Notice
 
 BIG_DESC = "123456789 " * 7 + "next line"
 BIG_URL = "http://" + "adsf" * 10
@@ -48,14 +50,14 @@ AVAILABLE_RESOURCES = [
 
 ALL_SERVICES_WRAPPED_HELP = textwrap.dedent(
     """
-Client to manage Ubuntu Advantage services on a machine.
+Client to manage Ubuntu Pro services on a machine.
  - cc-eal: Common Criteria EAL2 Provisioning Packages
    (https://ubuntu.com/cc-eal)
  - cis: Security compliance and audit tools
    (https://ubuntu.com/security/certifications/docs/usg)
- - esm-apps: UA Apps: Extended Security Maintenance (ESM)
+ - esm-apps: Expanded Security Maintenance for Applications
    (https://ubuntu.com/security/esm)
- - esm-infra: UA Infra: Extended Security Maintenance (ESM)
+ - esm-infra: Expanded Security Maintenance for Infrastructure
    (https://ubuntu.com/security/esm)
  - fips-updates: NIST-certified core packages with priority security updates
    (https://ubuntu.com/security/certifications#fips)
@@ -72,12 +74,14 @@ Client to manage Ubuntu Advantage services on a machine.
 
 SERVICES_WRAPPED_HELP = textwrap.dedent(
     """
-Client to manage Ubuntu Advantage services on a machine.
+Client to manage Ubuntu Pro services on a machine.
  - cc-eal: Common Criteria EAL2 Provisioning Packages
    (https://ubuntu.com/cc-eal)
  - cis: Security compliance and audit tools
    (https://ubuntu.com/security/certifications/docs/usg)
- - esm-infra: UA Infra: Extended Security Maintenance (ESM)
+ - esm-apps: Expanded Security Maintenance for Applications
+   (https://ubuntu.com/security/esm)
+ - esm-infra: Expanded Security Maintenance for Infrastructure
    (https://ubuntu.com/security/esm)
  - fips-updates: NIST-certified core packages with priority security updates
    (https://ubuntu.com/security/certifications#fips)
@@ -89,24 +93,32 @@ Client to manage Ubuntu Advantage services on a machine.
 )
 
 
-@pytest.fixture(params=["direct", "--help", "ua help", "ua help --all"])
+@pytest.fixture(params=["direct", "--help", "pro help", "pro help --all"])
 def get_help(request, capsys, FakeConfig):
     cfg = FakeConfig()
     if request.param == "direct":
 
         def _get_help_output():
-            parser = get_parser(cfg)
-            help_file = io.StringIO()
-            parser.print_help(file=help_file)
-            return (help_file.getvalue(), "base")
+            with mock.patch(
+                "uaclient.config.UAConfig",
+                return_value=FakeConfig(),
+            ):
+                parser = get_parser(cfg)
+                help_file = io.StringIO()
+                parser.print_help(file=help_file)
+                return (help_file.getvalue(), "base")
 
     elif request.param == "--help":
 
         def _get_help_output():
             parser = get_parser(cfg)
-            with mock.patch("sys.argv", ["ua", "--help"]):
-                with pytest.raises(SystemExit):
-                    parser.parse_args()
+            with mock.patch("sys.argv", ["pro", "--help"]):
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    with pytest.raises(SystemExit):
+                        parser.parse_args()
             out, _err = capsys.readouterr()
             return (out, "base")
 
@@ -114,7 +126,11 @@ def get_help(request, capsys, FakeConfig):
 
         def _get_help_output():
             with mock.patch("sys.argv", request.param.split(" ")):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
             out, _err = capsys.readouterr()
 
             if "--all" in request.param:
@@ -185,7 +201,9 @@ class TestCLIParser:
     def test_help_command_when_unnatached(
         self, m_attached, m_available_resources, out_format, expected_return
     ):
-        """Test help command for a valid service in an unnatached ua client."""
+        """
+        Test help command for a valid service in an unattached pro client.
+        """
         m_args = mock.MagicMock()
         m_service_name = mock.PropertyMock(return_value="test")
         type(m_args).service = m_service_name
@@ -239,7 +257,7 @@ class TestCLIParser:
     def test_help_command_when_attached(
         self, m_attached, m_available_resources, ent_status, ent_msg, is_beta
     ):
-        """Test help command for a valid service in an attached ua client."""
+        """Test help command for a valid service in an attached pro client."""
         m_args = mock.MagicMock()
         m_service_name = mock.PropertyMock(return_value="test")
         type(m_args).service = m_service_name
@@ -340,13 +358,13 @@ M_PATH_UACONFIG = "uaclient.config.UAConfig."
 class TestAssertLockFile:
     @mock.patch("os.getpid", return_value=123)
     @mock.patch(M_PATH_UACONFIG + "delete_cache_key")
-    @mock.patch(M_PATH_UACONFIG + "add_notice")
+    @mock.patch("uaclient.files.notices.NoticesManager.add")
     @mock.patch(M_PATH_UACONFIG + "write_cache")
     def test_assert_root_creates_lock_and_notice(
         self,
         m_write_cache,
         m_add_notice,
-        m_remove_notice,
+        m_delete_cache,
         _m_getpid,
         FakeConfig,
     ):
@@ -362,8 +380,10 @@ class TestAssertLockFile:
         ret = test_function(arg, cfg=FakeConfig())
         assert mock.sentinel.success == ret
         lock_msg = "Operation in progress: some operation"
-        assert [mock.call("", lock_msg)] == m_add_notice.call_args_list
-        assert [mock.call("lock")] == m_remove_notice.call_args_list
+        assert [
+            mock.call(True, Notice.OPERATION_IN_PROGRESS, lock_msg)
+        ] == m_add_notice.call_args_list
+        assert [mock.call("lock")] == m_delete_cache.call_args_list
         assert [
             mock.call("lock", "123:some operation")
         ] == m_write_cache.call_args_list
@@ -476,16 +496,22 @@ class TestMain:
         capsys,
         logging_sandbox,
         caplog_text,
+        event,
         exception,
         expected_error_msg,
         expected_log,
+        FakeConfig,
     ):
         m_args = m_get_parser.return_value.parse_args.return_value
         m_args.action.side_effect = exception
 
         with pytest.raises(SystemExit) as excinfo:
             with mock.patch("sys.argv", ["/usr/bin/ua", "subcmd"]):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
         assert 0 == m_delete_cache_key.call_count
 
         exc = excinfo.value
@@ -522,13 +548,18 @@ class TestMain:
         exception,
         expected_error_msg,
         expected_log,
+        FakeConfig,
     ):
         m_args = m_get_parser.return_value.parse_args.return_value
         m_args.action.side_effect = exception
 
         with pytest.raises(SystemExit) as excinfo:
             with mock.patch("sys.argv", ["/usr/bin/ua", "subcmd"]):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
         assert 0 == m_delete_cache_key.call_count
 
         exc = excinfo.value
@@ -548,8 +579,8 @@ class TestMain:
             (
                 LockHeldError(
                     pid="123",
-                    lock_request="ua reboot-cmds",
-                    lock_holder="ua auto-attach",
+                    lock_request="pro reboot-cmds",
+                    lock_holder="pro auto-attach",
                 ),
                 1,
             ),
@@ -564,6 +595,7 @@ class TestMain:
         capsys,
         logging_sandbox,
         caplog_text,
+        event,
         exception,
         expected_exit_code,
     ):
@@ -655,18 +687,24 @@ class TestMain:
     @pytest.mark.parametrize("caplog_text", [logging.DEBUG], indirect=True)
     @mock.patch("uaclient.cli.setup_logging")
     @mock.patch("uaclient.cli.get_parser")
-    @mock.patch.dict(
-        os.environ, {"NOT_UA_ENV": "YES", "UA_FEATURES_WOW": "XYZ"}
+    @mock.patch(
+        "uaclient.cli.util.get_pro_environment",
+        return_value={"UA_ENV": "YES", "UA_FEATURES_WOW": "XYZ"},
     )
     def test_environment_is_logged(
-        self, _m_get_parser, _m_setup_logging, logging_sandbox, caplog_text
+        self,
+        _m_pro_environment,
+        _m_get_parser,
+        _m_setup_logging,
+        logging_sandbox,
+        caplog_text,
     ):
         main(["some", "args"])
 
         log = caplog_text()
 
+        assert "UA_ENV=YES" in log
         assert "UA_FEATURES_WOW=XYZ" in log
-        assert "NOT_UA_ENV=YES" not in log
 
     @mock.patch("uaclient.cli.contract.get_available_resources")
     def test_argparse_errors_well_formatted(
@@ -674,7 +712,7 @@ class TestMain:
     ):
         cfg = FakeConfig()
         parser = get_parser(cfg)
-        with mock.patch("sys.argv", ["ua", "enable"]):
+        with mock.patch("sys.argv", ["pro", "enable"]):
             with pytest.raises(SystemExit) as excinfo:
                 parser.parse_args()
         assert 2 == excinfo.value.code
@@ -682,7 +720,7 @@ class TestMain:
         assert (
             textwrap.dedent(
                 """\
-            usage: ua enable <service> [<service>] [flags]
+            usage: pro enable <service> [<service>] [flags]
             the following arguments are required: service
         """
             )
@@ -870,3 +908,62 @@ class TestGetValidEntitlementNames:
 
         assert expected_ents_found == actual_ents_found
         assert expected_ents_not_found == actual_ents_not_found
+
+
+expected_notice = r""".*[info].* A new version is available: 1.2.3
+Please run:
+    sudo apt-get install ubuntu-advantage-tools
+to get the latest version with new features and bug fixes.
+"""
+
+
+# There is a fixture for this function to avoid leaking, as it is called in
+# the main CLI function. So, instead of importing it directly, we are using
+# the reference for the fixture to test it.
+class TestWarnAboutNewVersion:
+    @pytest.mark.parametrize("new_version", (None, "1.2.3"))
+    @pytest.mark.parametrize("caplog_text", [logging.WARNING], indirect=True)
+    @mock.patch("uaclient.cli.version.check_for_new_version")
+    def test_warn_about_new_version(
+        self,
+        m_check_version,
+        new_version,
+        caplog_text,
+        _warn_about_new_version,
+    ):
+        m_check_version.return_value = new_version
+
+        _warn_about_new_version()
+
+        if new_version:
+            assert re.search(expected_notice, caplog_text())
+        else:
+            assert not re.search(expected_notice, caplog_text())
+
+    @pytest.mark.parametrize("command", ("api", "status"))
+    @pytest.mark.parametrize("out_format", (None, "tabular", "json"))
+    @pytest.mark.parametrize("caplog_text", [logging.WARNING], indirect=True)
+    @mock.patch(
+        "uaclient.cli.version.check_for_new_version", return_value="1.2.3"
+    )
+    def test_dont_show_for_api_calls(
+        self,
+        _m_check_version,
+        caplog_text,
+        command,
+        out_format,
+        _warn_about_new_version,
+    ):
+        args = mock.MagicMock()
+        args.command = command
+        args.format = out_format
+
+        if not out_format:
+            del args.format
+
+        _warn_about_new_version(args)
+
+        if command != "api" and out_format != "json":
+            assert re.search(expected_notice, caplog_text())
+        else:
+            assert not re.search(expected_notice, caplog_text())

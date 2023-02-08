@@ -35,20 +35,8 @@ class RepoTestEntitlement(RepoEntitlement):
     repo_key_file = "test.gpg"
 
 
-class RepoTestEntitlementDisableAptAuthOnly(RepoTestEntitlement):
-    disable_apt_auth_only = True
-
-
-class RepoTestEntitlementDisableAptAuthOnlyFalse(RepoTestEntitlement):
-    disable_apt_auth_only = False
-
-
-class RepoTestEntitlementRepoPinInt(RepoTestEntitlement):
+class RepoTestEntitlementRepoWithPin(RepoTestEntitlement):
     repo_pin_priority = 1000
-
-
-class RepoTestEntitlementRepoPinNever(RepoTestEntitlement):
-    repo_pin_priority = "never"
 
 
 @pytest.fixture
@@ -59,7 +47,7 @@ def entitlement(entitlement_factory):
 
 
 class TestUserFacingStatus:
-    @mock.patch(M_PATH + "util.get_platform_info")
+    @mock.patch(M_PATH + "system.get_platform_info")
     def test_inapplicable_on_inapplicable_applicability_status(
         self, m_platform_info, entitlement
     ):
@@ -78,7 +66,7 @@ class TestUserFacingStatus:
         uf_status, _ = entitlement.user_facing_status()
         assert UserFacingStatus.INAPPLICABLE == uf_status
 
-    @mock.patch(M_PATH + "util.get_platform_info")
+    @mock.patch(M_PATH + "system.get_platform_info")
     def test_unavailable_on_unentitled(self, m_platform_info, entitlement):
         """When unentitled, return UNAVAILABLE."""
         no_entitlements = copy.deepcopy(machine_token("blah"))
@@ -86,7 +74,7 @@ class TestUserFacingStatus:
         no_entitlements["machineTokenInfo"]["contractInfo"][
             "resourceEntitlements"
         ].pop()
-        entitlement.cfg.write_cache("machine-token", no_entitlements)
+        entitlement.cfg.machine_token_file.write(no_entitlements)
         m_platform_info.return_value = dict(PLATFORM_INFO_SUPPORTED)
         applicability, _details = entitlement.applicability_status()
         assert ApplicabilityStatus.APPLICABLE == applicability
@@ -198,6 +186,7 @@ class TestProcessContractDeltas:
         m_enable,
         entitlement,
         capsys,
+        event,
     ):
         """Log a message when inactive, enableByDefault and allow_enable."""
         m_application_status.return_value = (
@@ -271,7 +260,7 @@ class TestProcessContractDeltas:
         "uaclient.entitlements.base.UAEntitlement.process_contract_deltas"
     )
     @mock.patch("uaclient.config.UAConfig.read_cache")
-    @mock.patch(M_PATH + "util.get_platform_info")
+    @mock.patch(M_PATH + "system.get_platform_info")
     @mock.patch(M_PATH + "apt.remove_auth_apt_repo")
     @mock.patch.object(RepoTestEntitlement, "setup_apt_config")
     @mock.patch.object(RepoTestEntitlement, "remove_apt_config")
@@ -331,7 +320,7 @@ class TestProcessContractDeltas:
         "uaclient.entitlements.base.UAEntitlement.process_contract_deltas"
     )
     @mock.patch("uaclient.config.UAConfig.read_cache")
-    @mock.patch(M_PATH + "util.get_platform_info")
+    @mock.patch(M_PATH + "system.get_platform_info")
     @mock.patch(M_PATH + "apt.remove_auth_apt_repo")
     @mock.patch.object(RepoTestEntitlement, "setup_apt_config")
     @mock.patch.object(RepoTestEntitlement, "remove_apt_config")
@@ -386,44 +375,6 @@ class TestProcessContractDeltas:
 
 class TestRepoEnable:
     @pytest.mark.parametrize(
-        "pre_enable_msg, output, perform_enable_call_count",
-        (
-            (["msg1", (lambda: False, {}), "msg2"], "msg1\n", 0),
-            (["msg1", (lambda: True, {}), "msg2"], "msg1\nmsg2\n", 1),
-        ),
-    )
-    @mock.patch.object(
-        RepoTestEntitlement,
-        "_perform_enable",
-        return_value=False,
-    )
-    @mock.patch.object(
-        RepoTestEntitlement,
-        "can_enable",
-        return_value=(True, None),
-    )
-    def test_enable_can_exit_on_pre_enable_messaging_hooks(
-        self,
-        _m_can_enable,
-        m_perform_enable,
-        pre_enable_msg,
-        output,
-        perform_enable_call_count,
-        entitlement,
-        capsys,
-    ):
-        with mock.patch(
-            M_PATH + "RepoEntitlement.messaging",
-            new_callable=mock.PropertyMock,
-        ) as m_messaging:
-            m_messaging.return_value = {"pre_enable": pre_enable_msg}
-            with mock.patch.object(type(entitlement), "packages", []):
-                entitlement.enable()
-        stdout, _ = capsys.readouterr()
-        assert output == stdout
-        assert perform_enable_call_count == m_perform_enable.call_count
-
-    @pytest.mark.parametrize(
         "pre_disable_msg,post_disable_msg,output,retval",
         (
             (
@@ -447,8 +398,8 @@ class TestRepoEnable:
             ),
         ),
     )
-    @mock.patch(M_PATH + "util.subp", return_value=("", ""))
-    @mock.patch(M_PATH + "util.should_reboot")
+    @mock.patch(M_PATH + "system.subp", return_value=("", ""))
+    @mock.patch(M_PATH + "system.should_reboot")
     @mock.patch.object(RepoTestEntitlement, "remove_apt_config")
     @mock.patch.object(
         RepoTestEntitlement, "can_disable", return_value=(True, None)
@@ -465,6 +416,7 @@ class TestRepoEnable:
         retval,
         entitlement,
         capsys,
+        event,
     ):
         messaging = {
             "pre_disable": pre_disable_msg,
@@ -481,12 +433,13 @@ class TestRepoEnable:
     @pytest.mark.parametrize("should_reboot", (False, True))
     @pytest.mark.parametrize("with_pre_install_msg", (False, True))
     @pytest.mark.parametrize("packages", (["a"], [], None))
+    @mock.patch("os.getuid", return_value=0)
     @mock.patch("uaclient.apt.setup_apt_proxy")
-    @mock.patch(M_PATH + "util.should_reboot")
-    @mock.patch(M_PATH + "util.subp", return_value=("", ""))
+    @mock.patch(M_PATH + "system.should_reboot")
+    @mock.patch(M_PATH + "system.subp", return_value=("", ""))
     @mock.patch(M_PATH + "apt.add_auth_apt_repo")
-    @mock.patch(M_PATH + "os.path.exists", return_value=True)
-    @mock.patch(M_PATH + "util.get_platform_info")
+    @mock.patch(M_PATH + "exists", return_value=True)
+    @mock.patch(M_PATH + "system.get_platform_info")
     @mock.patch.object(
         RepoTestEntitlement, "can_enable", return_value=(True, None)
     )
@@ -499,10 +452,11 @@ class TestRepoEnable:
         m_subp,
         m_should_reboot,
         m_setup_apt_proxy,
+        _m_getuid,
         entitlement,
         capsys,
         caplog_text,
-        tmpdir,
+        event,
         packages,
         with_pre_install_msg,
         should_reboot,
@@ -596,7 +550,7 @@ class TestRepoEnable:
         assert expected_output == stdout
 
     @mock.patch("uaclient.apt.setup_apt_proxy")
-    @mock.patch(M_PATH + "util.subp")
+    @mock.patch(M_PATH + "system.subp")
     def test_failed_install_removes_apt_config_and_packages(
         self, m_subp, _m_setup_apt_proxy, entitlement
     ):
@@ -624,6 +578,80 @@ class TestRepoEnable:
         assert 1 == m_rac.call_count
 
 
+class TestPerformEnable:
+    @pytest.mark.parametrize(
+        [
+            "supports_access_only",
+            "access_only",
+            "expected_setup_apt_calls",
+            "expected_install_calls",
+            "expected_check_for_reboot_calls",
+        ],
+        [
+            (
+                False,
+                False,
+                [mock.call(silent=mock.ANY)],
+                [mock.call()],
+                [mock.call(operation="install")],
+            ),
+            (
+                False,
+                True,
+                [mock.call(silent=mock.ANY)],
+                [mock.call()],
+                [mock.call(operation="install")],
+            ),
+            (
+                True,
+                False,
+                [mock.call(silent=mock.ANY)],
+                [mock.call()],
+                [mock.call(operation="install")],
+            ),
+            (
+                True,
+                True,
+                [mock.call(silent=mock.ANY)],
+                [],
+                [],
+            ),
+        ],
+    )
+    @mock.patch(M_PATH + "RepoEntitlement._check_for_reboot_msg")
+    @mock.patch(M_PATH + "RepoEntitlement.install_packages")
+    @mock.patch(M_PATH + "RepoEntitlement.setup_apt_config")
+    def test_perform_enable(
+        self,
+        m_setup_apt_config,
+        m_install_packages,
+        m_check_for_reboot_msg,
+        supports_access_only,
+        access_only,
+        expected_setup_apt_calls,
+        expected_install_calls,
+        expected_check_for_reboot_calls,
+        entitlement_factory,
+    ):
+        with mock.patch.object(
+            RepoTestEntitlement, "supports_access_only", supports_access_only
+        ):
+            entitlement = entitlement_factory(
+                RepoTestEntitlement,
+                affordances={"series": ["xenial"]},
+                access_only=access_only,
+            )
+            assert entitlement._perform_enable(silent=True) is True
+            assert (
+                m_setup_apt_config.call_args_list == expected_setup_apt_calls
+            )
+            assert m_install_packages.call_args_list == expected_install_calls
+            assert (
+                m_check_for_reboot_msg.call_args_list
+                == expected_check_for_reboot_calls
+            )
+
+
 class TestRemoveAptConfig:
     def test_missing_aptURL(self, entitlement_factory):
         # Make aptURL missing
@@ -647,8 +675,8 @@ class TestRemoveAptConfig:
     @mock.patch(M_PATH + "apt.remove_auth_apt_repo")
     @mock.patch(M_PATH + "apt.remove_apt_list_files")
     @mock.patch(M_PATH + "apt.run_apt_command")
-    @mock.patch(M_PATH + "util.get_platform_info")
-    def test_disable_apt_auth_only_false_removes_all_apt_config(
+    @mock.patch(M_PATH + "system.get_platform_info")
+    def test_disable_removes_all_apt_config(
         self,
         m_get_platform,
         _m_run_apt_command,
@@ -660,7 +688,7 @@ class TestRemoveAptConfig:
         m_get_platform.return_value = {"series": "xenial"}
 
         entitlement = entitlement_factory(
-            RepoTestEntitlementDisableAptAuthOnlyFalse,
+            RepoTestEntitlement,
             affordances={"series": ["xenial"]},
         )
         entitlement.remove_apt_config()
@@ -676,72 +704,12 @@ class TestRemoveAptConfig:
             )
         ] == m_remove_auth_apt_repo.call_args_list
 
-    @mock.patch(M_PATH + "apt.remove_repo_from_apt_auth_file")
-    @mock.patch(M_PATH + "apt.restore_commented_apt_list_file")
-    @mock.patch(M_PATH + "apt.run_apt_command")
-    @mock.patch(M_PATH + "util.get_platform_info")
-    def test_disable_apt_auth_only_removes_authentication_for_repo(
-        self,
-        m_get_platform,
-        _m_run_apt_command,
-        m_restore_commented_apt_list_file,
-        m_remove_repo_from_apt_auth_file,
-        entitlement_factory,
-    ):
-        """Remove APT authentication for repos with disable_apt_auth_only.
-
-        Any commented APT list entries are restored to uncommented lines.
-        """
-        m_get_platform.return_value = {"series": "xenial"}
-        entitlement = entitlement_factory(
-            RepoTestEntitlementDisableAptAuthOnly,
-            affordances={"series": ["xenial"]},
-        )
-        entitlement.remove_apt_config()
-
-        assert [
-            mock.call("http://REPOTEST")
-        ] == m_remove_repo_from_apt_auth_file.call_args_list
-        assert [
-            mock.call("/etc/apt/sources.list.d/ubuntu-repotest.list")
-        ] == m_restore_commented_apt_list_file.call_args_list
-
-    @mock.patch(M_PATH + "apt.add_ppa_pinning")
+    @mock.patch(M_PATH + "system.ensure_file_absent")
     @mock.patch(M_PATH + "apt.remove_auth_apt_repo")
     @mock.patch(M_PATH + "apt.remove_apt_list_files")
     @mock.patch(M_PATH + "apt.run_apt_command")
-    @mock.patch(M_PATH + "util.get_platform_info")
-    def test_repo_pin_priority_never_configures_repo_pinning_on_remove(
-        self,
-        m_get_platform,
-        _m_run_apt_command,
-        _m_remove_apt_list_files,
-        _m_remove_auth_apt_repo,
-        m_add_ppa_pinning,
-        entitlement_factory,
-    ):
-        """Pin the repo 'never' when repo_pin_priority is never."""
-        m_get_platform.return_value = {"series": "xenial"}
-
-        entitlement = entitlement_factory(
-            RepoTestEntitlementRepoPinNever, affordances={"series": ["xenial"]}
-        )
-        entitlement.remove_apt_config()
-        assert [
-            mock.call(
-                "/etc/apt/preferences.d/ubuntu-repotest",
-                "http://REPOTEST",
-                None,
-                "never",
-            )
-        ] == m_add_ppa_pinning.call_args_list
-
-    @mock.patch(M_PATH + "os.unlink")
-    @mock.patch(M_PATH + "apt.remove_auth_apt_repo")
-    @mock.patch(M_PATH + "apt.remove_apt_list_files")
-    @mock.patch(M_PATH + "apt.run_apt_command")
-    @mock.patch(M_PATH + "util.get_platform_info")
-    @mock.patch(M_PATH + "util.apply_contract_overrides")
+    @mock.patch(M_PATH + "system.get_platform_info")
+    @mock.patch(M_PATH + "contract.apply_contract_overrides")
     def test_repo_pin_priority_int_removes_apt_preferences(
         self,
         _m_contract_overrides,
@@ -749,23 +717,21 @@ class TestRemoveAptConfig:
         _m_run_apt_command,
         _m_remove_apt_list_files,
         _m_remove_auth_apt_repo,
-        m_unlink,
+        m_ensure_file_absent,
         entitlement_factory,
     ):
         """Remove apt preferences file when repo_pin_priority is an int."""
         m_get_platform.return_value = {"series": "xenial"}
 
         entitlement = entitlement_factory(
-            RepoTestEntitlementRepoPinInt, affordances={"series": ["xenial"]}
+            RepoTestEntitlementRepoWithPin, affordances={"series": ["xenial"]}
         )
 
         assert 1000 == entitlement.repo_pin_priority
-        with mock.patch(M_PATH + "os.path.exists") as m_exists:
-            m_exists.return_value = True
-            entitlement.remove_apt_config()
-        expected_call = [mock.call("/etc/apt/preferences.d/ubuntu-repotest")]
-        assert expected_call == m_exists.call_args_list
-        assert expected_call == m_unlink.call_args_list
+        entitlement.remove_apt_config()
+        assert [
+            mock.call("/etc/apt/preferences.d/ubuntu-repotest")
+        ] == m_ensure_file_absent.call_args_list
 
 
 class TestSetupAptConfig:
@@ -776,7 +742,7 @@ class TestSetupAptConfig:
                 RepoTestEntitlement,
                 {},
                 exceptions.UserFacingError,
-                "Ubuntu Advantage server provided no aptKey directive for"
+                "Ubuntu Pro server provided no aptKey directive for"
                 " repotest.",
             ),
             (
@@ -832,10 +798,10 @@ class TestSetupAptConfig:
             affordances={"series": ["xenial"]},
             obligations={"enableByDefault": enable_by_default},
         )
-        machine_token = entitlement.cfg.read_cache("machine-token")
+        machine_token = entitlement.cfg.machine_token_file.machine_token
         # Drop resourceTokens values from base machine-token.
         machine_token["resourceTokens"] = []
-        entitlement.cfg.write_cache("machine-token", machine_token)
+        entitlement.cfg.machine_token_file.write(machine_token)
         entitlement.setup_apt_config()
         expected_msg = (
             "No resourceToken present in contract for service Repo Test"
@@ -871,7 +837,7 @@ class TestSetupAptConfig:
     @mock.patch("uaclient.apt.setup_apt_proxy")
     @mock.patch(M_PATH + "apt.add_auth_apt_repo")
     @mock.patch(M_PATH + "apt.run_apt_install_command")
-    @mock.patch(M_PATH + "util.apply_contract_overrides")
+    @mock.patch(M_PATH + "contract.apply_contract_overrides")
     def test_install_prerequisite_packages(
         self,
         _m_contract_overrides,
@@ -885,7 +851,7 @@ class TestSetupAptConfig:
         Presence is determined based on checking known files from those debs.
         It avoids a costly round-trip shelling out to call dpkg -l.
         """
-        with mock.patch(M_PATH + "os.path.exists") as m_exists:
+        with mock.patch(M_PATH + "exists") as m_exists:
             m_exists.return_value = False
             entitlement.setup_apt_config()
         assert [
@@ -898,14 +864,14 @@ class TestSetupAptConfig:
         assert install_call in m_run_apt_install_command.call_args_list
 
     @mock.patch("uaclient.apt.setup_apt_proxy")
-    @mock.patch(M_PATH + "util.get_platform_info")
+    @mock.patch(M_PATH + "system.get_platform_info")
     def test_setup_error_with_repo_pin_priority_and_missing_origin(
         self, m_get_platform_info, _setup_apt_proxy, entitlement_factory
     ):
         """Raise error when repo_pin_priority is set and origin is None."""
         m_get_platform_info.return_value = {"series": "xenial"}
         entitlement = entitlement_factory(
-            RepoTestEntitlementRepoPinNever, affordances={"series": ["xenial"]}
+            RepoTestEntitlementRepoWithPin, affordances={"series": ["xenial"]}
         )
         with pytest.raises(exceptions.UserFacingError) as excinfo:
             entitlement.setup_apt_config()
@@ -915,45 +881,11 @@ class TestSetupAptConfig:
         )
 
     @mock.patch("uaclient.apt.setup_apt_proxy")
-    @mock.patch(M_PATH + "os.unlink")
-    @mock.patch(M_PATH + "apt.add_auth_apt_repo")
-    @mock.patch(M_PATH + "apt.run_apt_command")
-    @mock.patch(M_PATH + "util.get_platform_info")
-    @mock.patch(M_PATH + "util.apply_contract_overrides")
-    def test_setup_with_repo_pin_priority_never_removes_apt_preferences_file(
-        self,
-        _m_contract_overrides,
-        m_get_platform_info,
-        m_run_apt_command,
-        m_add_auth_repo,
-        m_unlink,
-        _m_setup_apt_proxy,
-        entitlement_factory,
-    ):
-        """When repo_pin_priority is never, disable repo in apt preferences."""
-        m_get_platform_info.return_value = {"series": "xenial"}
-        entitlement = entitlement_factory(
-            RepoTestEntitlementRepoPinNever, affordances={"series": ["xenial"]}
-        )
-        entitlement.origin = "RepoTestOrigin"  # don't error on origin = None
-        with mock.patch(M_PATH + "os.path.exists") as m_exists:
-            m_exists.return_value = True
-            entitlement.setup_apt_config()
-        assert [
-            mock.call("/etc/apt/preferences.d/ubuntu-repotest"),
-            mock.call("/usr/lib/apt/methods/https"),
-            mock.call("/usr/sbin/update-ca-certificates"),
-        ] == m_exists.call_args_list
-        assert [
-            mock.call("/etc/apt/preferences.d/ubuntu-repotest")
-        ] == m_unlink.call_args_list
-
-    @mock.patch("uaclient.apt.setup_apt_proxy")
     @mock.patch(M_PATH + "apt.add_auth_apt_repo")
     @mock.patch(M_PATH + "apt.run_apt_update_command")
     @mock.patch(M_PATH + "apt.add_ppa_pinning")
-    @mock.patch(M_PATH + "util.get_platform_info")
-    @mock.patch(M_PATH + "util.apply_contract_overrides")
+    @mock.patch(M_PATH + "system.get_platform_info")
+    @mock.patch(M_PATH + "contract.apply_contract_overrides")
     def test_setup_with_repo_pin_priority_int_adds_a_pins_repo_apt_preference(
         self,
         _m_apply_overrides,
@@ -967,10 +899,10 @@ class TestSetupAptConfig:
         """When repo_pin_priority is an int, set pin in apt preferences."""
         m_get_platform_info.return_value = {"series": "xenial"}
         entitlement = entitlement_factory(
-            RepoTestEntitlementRepoPinInt, affordances={"series": ["xenial"]}
+            RepoTestEntitlementRepoWithPin, affordances={"series": ["xenial"]}
         )
         entitlement.origin = "RepoTestOrigin"  # don't error on origin = None
-        with mock.patch(M_PATH + "os.path.exists") as m_exists:
+        with mock.patch(M_PATH + "exists") as m_exists:
             m_exists.return_value = True  # Skip prerequisite pkg installs
             entitlement.setup_apt_config()
         assert [
@@ -990,14 +922,14 @@ class TestSetupAptConfig:
 
 class TestCheckAptURLIsApplied:
     @pytest.mark.parametrize("apt_url", (("test"), (None)))
-    @mock.patch("uaclient.util.load_file")
+    @mock.patch("uaclient.system.load_file")
     def test_check_apt_url_for_commented_apt_source_file(
         self, m_load_file, apt_url, entitlement
     ):
         m_load_file.return_value = "#test1\n#test2\n"
         assert not entitlement._check_apt_url_is_applied(apt_url)
 
-    @mock.patch("uaclient.util.load_file")
+    @mock.patch("uaclient.system.load_file")
     def test_check_apt_url_when_delta_apt_url_is_none(
         self, m_load_file, entitlement
     ):
@@ -1007,7 +939,7 @@ class TestCheckAptURLIsApplied:
     @pytest.mark.parametrize(
         "apt_url,expected", (("test", True), ("blah", False))
     )
-    @mock.patch("uaclient.util.load_file")
+    @mock.patch("uaclient.system.load_file")
     def test_check_apt_url_inspects_apt_source_file(
         self, m_load_file, apt_url, expected, entitlement
     ):
@@ -1017,6 +949,7 @@ class TestCheckAptURLIsApplied:
 
 class TestApplicationStatus:
     # TODO: Write tests for all functionality
+    # 🤔
 
     def test_missing_aptURL(self, entitlement_factory):
         # Make aptURL missing
@@ -1031,26 +964,25 @@ class TestApplicationStatus:
         )
 
     @pytest.mark.parametrize(
-        "pin,policy_url,enabled",
+        "policy_url,enabled",
         (
-            (500, "https://esm.ubuntu.com/apps/ubuntu", False),
-            (-32768, "https://esm.ubuntu.com/ubuntu", False),
-            (500, "https://esm.ubuntu.com/ubuntu", True),
+            ("https://esm.ubuntu.com/apps/ubuntu", False),
+            ("https://esm.ubuntu.com/ubuntu", True),
         ),
     )
-    @mock.patch(M_PATH + "apt.run_apt_cache_policy_command")
+    @mock.patch(M_PATH + "apt.get_apt_cache_policy")
     def test_enabled_status_by_apt_policy(
-        self, m_run_apt_policy, pin, policy_url, enabled, entitlement_factory
+        self, m_run_apt_policy, policy_url, enabled, entitlement_factory
     ):
-        """Report ENABLED when apt-policy lists specific aptURL and 500 pin."""
+        """Report ENABLED when apt-policy lists specific aptURL."""
         entitlement = entitlement_factory(
             RepoTestEntitlement,
             directives={"aptURL": "https://esm.ubuntu.com"},
         )
 
         policy_lines = [
-            "{pin} {policy_url} bionic-security/main amd64 Packages".format(
-                pin=pin, policy_url=policy_url
+            "500 {policy_url} bionic-security/main amd64 Packages".format(
+                policy_url=policy_url
             ),
             " release v=18.04,o=UbuntuESMApps,...,n=bionic,l=UbuntuESMApps",
             "  origin esm.ubuntu.com",

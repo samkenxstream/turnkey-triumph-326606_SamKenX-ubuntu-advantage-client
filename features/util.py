@@ -1,14 +1,17 @@
+import datetime
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
-import textwrap
+from enum import Enum
 from typing import Iterable, List, Optional
 
 import yaml
 
+SUT = "system-under-test"
 LXC_PROPERTY_MAP = {
     "image": {"series": "properties.release", "machine_type": "Type"},
     "container": {"series": "image.release", "machine_type": "image.type"},
@@ -18,25 +21,17 @@ SOURCE_PR_TGZ = os.path.join(UA_TMP_DIR, "pr_source.tar.gz")
 SOURCE_PR_UNTAR_DIR = os.path.join(UA_TMP_DIR, "behave-ua-src")
 SBUILD_DIR = os.path.join(UA_TMP_DIR, "sbuild")
 UA_DEB_BUILD_CACHE = os.path.join(UA_TMP_DIR, "deb-cache")
-UA_DEBS = frozenset({"ubuntu-advantage-tools.deb", "ubuntu-advantage-pro.deb"})
 
 
-BUILD_FROM_TGZ = textwrap.dedent(
-    """\
-   #!/bin/bash
-   set -o xtrace
-   apt-get update
-   apt-get install make
-   cd /tmp
-   tar -zxf *gz
-   cd *ubuntu-advantage-client*
-   make deps
-   dpkg-buildpackage -us -uc
-   # Copy and rename versioned debs to /tmp/ubuntu-advantage-(tools|pro).deb
-   cp /tmp/ubuntu-advantage-tools*.deb /tmp/ubuntu-advantage-tools.deb
-   cp /tmp/ubuntu-advantage-pro*.deb /tmp/ubuntu-advantage-pro.deb
-   """
-)
+class InstallationSource(Enum):
+    ARCHIVE = "archive"
+    PREBUILT = "prebuilt"
+    LOCAL = "local"
+    DAILY = "daily"
+    STAGING = "staging"
+    STABLE = "stable"
+    PROPOSED = "proposed"
+    CUSTOM = "custom"
 
 
 def lxc_get_property(name: str, property_name: str, image: bool = False):
@@ -151,17 +146,13 @@ def repo_state_hash(
     return hashlib.md5(output_to_hash).hexdigest()
 
 
-def build_debs(
-    series: str, cache_source: bool = False, chroot: Optional[str] = None
-) -> List[str]:
+def build_debs(series: str, chroot: Optional[str] = None) -> List[str]:
     """
     Build the package through sbuild and store the debs into
     output_deb_dir
 
     :param series: The target series to build the package for
     :param output_deb_dir: the target directory in which to copy deb artifacts
-    :param cache_source: If False, we will always rebuild the source environemt
-                         for sbuild
 
     :return: A list of file paths to debs created by the build.
     """
@@ -185,45 +176,42 @@ def build_debs(
         return [tools_deb_cache_path, pro_deb_cache_path]
 
     logging.info("--- Creating: {}".format(SOURCE_PR_TGZ))
-    if not os.path.exists(os.path.dirname(SOURCE_PR_TGZ)):
-        os.makedirs(os.path.dirname(SOURCE_PR_TGZ))
 
-    if not os.path.exists(SOURCE_PR_TGZ) or not cache_source:
-        cwd = os.getcwd()
-        os.chdir("..")
-        subprocess.run(
-            [
-                "tar",
-                "-zcf",
-                SOURCE_PR_TGZ,
-                "--exclude-vcs",
-                "--exclude-vcs-ignores",
-                os.path.basename(cwd),
-            ],
-            check=True,
-        )
-        os.chdir(cwd)
+    cwd = os.getcwd()
+    os.chdir("..")
+    subprocess.run(
+        [
+            "tar",
+            "-zcf",
+            SOURCE_PR_TGZ,
+            "--exclude-vcs",
+            "--exclude-vcs-ignores",
+            os.path.basename(cwd),
+        ],
+        check=True,
+    )
+    os.chdir(cwd)
 
     logging.info("--- Creating: {}".format(SOURCE_PR_UNTAR_DIR))
-    if not os.path.exists(SOURCE_PR_UNTAR_DIR) or not cache_source:
-        # Delete cached folder for ua code
-        if os.path.exists(SOURCE_PR_UNTAR_DIR):
-            shutil.rmtree(SOURCE_PR_UNTAR_DIR)
 
-        os.makedirs(SOURCE_PR_UNTAR_DIR)
-        subprocess.run(
-            [
-                "tar",
-                "-xvf",
-                SOURCE_PR_TGZ,
-                "-C",
-                SOURCE_PR_UNTAR_DIR,
-                "--strip-components=1",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        )
+    # Delete cached folder for pro code
+    if os.path.exists(SOURCE_PR_UNTAR_DIR):
+        shutil.rmtree(SOURCE_PR_UNTAR_DIR)
+
+    os.makedirs(SOURCE_PR_UNTAR_DIR)
+    subprocess.run(
+        [
+            "tar",
+            "-xvf",
+            SOURCE_PR_TGZ,
+            "-C",
+            SOURCE_PR_UNTAR_DIR,
+            "--strip-components=1",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
 
     if os.path.exists(SBUILD_DIR):
         shutil.rmtree(SBUILD_DIR)
@@ -284,3 +272,51 @@ class SafeLoaderWithoutDatetime(yaml.SafeLoader):
         k: [r for r in v if r[0] != "tag:yaml.org,2002:timestamp"]
         for k, v in yaml.SafeLoader.yaml_implicit_resolvers.items()
     }
+
+
+def _replace_and_log(s, old, new):
+    logging.debug('replacing "{}" with "{}"'.format(old, new))
+    return s.replace(old, new)
+
+
+def process_template_vars(context, template: str) -> str:
+    processed_template = template
+
+    for match in re.finditer(r"\$behave_var{(.*)}", template):
+        args = match.group(1).split()
+        function_name = args[0]
+        if function_name == "version":
+            if context.config.check_version:
+                processed_template = _replace_and_log(
+                    processed_template,
+                    match.group(0),
+                    context.config.check_version,
+                )
+        elif function_name == "machine-ip":
+            if args[1] in context.machines:
+                processed_template = _replace_and_log(
+                    processed_template,
+                    match.group(0),
+                    context.machines[args[1]].instance.ip,
+                )
+        elif function_name == "cloud":
+            processed_template = _replace_and_log(
+                processed_template, match.group(0), context.config.cloud
+            )
+        elif function_name == "today":
+            dt = datetime.datetime.utcnow()
+            if len(args) == 2:
+                offset = int(args[1])
+                dt = dt + datetime.timedelta(days=offset)
+            dt_str = dt.strftime("%Y-%m-%dT00:00:00Z")
+            processed_template = _replace_and_log(
+                processed_template, match.group(0), dt_str
+            )
+        elif function_name == "contract_token_staging":
+            processed_template = _replace_and_log(
+                processed_template,
+                match.group(0),
+                context.config.contract_token_staging,
+            )
+
+    return processed_template

@@ -4,6 +4,274 @@ ubuntu-advantage-tools (28.0) UNRELEASED; urgency=medium
 
  -- Chad Smith <chad.smith@canonical.com>  Wed, 19 May 2021 16:35:25 -0600
 
+ubuntu-advantage-tools (27.13.2~23.04.1) lunar; urgency=medium
+
+  * d/ubuntu-advantage-tools.{postinst,postrm,preinst}:
+    - avoid a dpkg conf prompt if the only change to the original config file
+      was to the apt_news flag (LP: #2003977)
+  * apt-hook:
+    - only run the pro client pre-update hook services when the apt update is
+      executed as root user (LP: #2004057)
+
+ -- Renan Rodrigo <renanrodrigo@canonical.com>  Fri, 27 Jan 2023 18:46:42 -0300
+
+ubuntu-advantage-tools (27.13.1~23.04.1) lunar; urgency=medium
+
+  * apt: better isolate apt esm cache by only fetching necessary
+    configuration from the system apt
+
+ -- Lucas Moura <lucas.moura@canonical.com>  Mon, 23 Jan 2023 11:54:06 -0300
+
+ubuntu-advantage-tools (27.13~23.04.1) lunar; urgency=medium
+
+  * d/bash-completion:
+    - enable autocomplete for the 'pro' command (GH: #2280)
+  * d/control:
+    - update the package description
+  * d/postinst:
+    - remove unauthenticated esm repos from Xenial systems (LP: #1990378)
+  * New upstream release 27.13 (LP: #2003018)
+    - apt:
+      + remove logic which added repositories and pinned them to 'never' to
+        enable access to esm package lists
+      + add functionality to create and update a local apt esm cache with
+        the lists for esm-infra and esm-apps
+    - apt-hook: update the cpp hook to use the local esm apt cache
+    - apt-news:
+      + fetch and display APT News in apt upgrade
+      + show contract expiration notices in the apt news output
+    - attach: support attaching without being able to install snapd
+      (LP: #1997514)
+    - cli:
+      + do not show invalid subcommands in autocomplete (GH: #2279)
+      + add support for attaching through the web portal, without a token
+    - config: add apt_news_url option
+    - docs: reorganize documentation and correct information
+    - esm-apps: release the service as GA
+    - jobs:
+      + remove the update_status job
+      + remove unused job which checks for the system EOL
+    - messaging: do not fail if the apt-hook executable is not present
+      (LP: #1994480)
+    - motd: announce esm-apps as GA
+    - security-status:
+      + use the local esm cache to report updates when the services are
+        disabled
+      + redesign output to properly show support (LP: #2002407)
+    - services: add new service to update the local esm caches
+    - ros: release the service as GA
+    - bug fixes:
+      + report reboot_required even if 'livepatch status' fails
+      + do not create unexpected environment variables when the autocomplete
+        script runs
+      + contract requests do not cause 'pro status' to fail
+      + remove auto-attach motd message if any failure happens
+      + log when 'cloud-id' fails
+      + always honor the metering job timer config
+      + write files atomically
+
+ -- Renan Rodrigo <renanrodrigo@canonical.com>  Mon, 16 Jan 2023 10:01:11 -0300
+
+ubuntu-advantage-tools (27.12~23.04.1) lunar; urgency=medium
+
+  * New upstream release 27.12 (LP: #1996424):
+    - auto-attach:
+      + retry auto-attach for up to one month on Ubuntu Pro cloud instances
+      + make a best effort to auto-attach when using the API
+    - enable: show deduplicated list of supported arches (GH: #917)
+    - fips: remove cloud package override logic from the client
+    - messaging: verify contract expiration date on contract server before
+      outputting expired message on MOTD
+    - realtime-kernel: make service non-beta
+    - reboot-required:
+      + add API support to show if the system requires a reboot
+        (u.pro.security.status.reboot_required.v1)
+      + add cli command for the functionality (pro system reboot-required)
+    - security-status:
+      + add API support to report standard updates (u.pro.packages.updates.v1)
+      + add API support to show CVEs patched by Livepatch
+        (u.pro.security.status.livepatch_cves.v1)
+      + add API support to show packages summary information
+        (u.pro.packages.summary.v1)
+      + list packages in oci manifest format (u.security.package_manifest.v1)
+    - systemd: do not attempt to auto-attach if a machine-token is present
+
+ -- Lucas Moura <lucas.moura@canonical.com>  Fri, 11 Nov 2022 14:27:00 -0300
+
+ubuntu-advantage-tools (27.11.3~22.10.1) kinetic; urgency=medium
+
+  * New upstream release 27.11.3: (LP: #1993006)
+    - d/postinst: remove the Ubuntu Pro beta apt message and set up the
+      configurable flag for "APT news" instead
+    - collect-logs: do not fail if a file cannot be read (LP: #1991858)
+    - config: add a flag to disable "APT news" (LP: 1992026)
+    - messaging: add announcement of "APT news" to apt output
+    - messaging: only show "APT news" when using apt binary (GH: #2288)
+    - version: use /run instead of /tmp for version file (GH: #2294)
+
+ -- Grant Orndorff <grant.orndorff@canonical.com>  Fri, 14 Oct 2022 16:55:27 -0400
+
+ubuntu-advantage-tools (27.11.2~22.10.1) kinetic; urgency=medium
+
+  * New upstream release 27.11.2: (LP: #1991173)
+    - esm: add the --beta flag back to esm-apps
+    - messaging: show Ubuntu Pro beta message in apt output
+    - security-status: don't show esm-apps information when the service is not
+      enabled
+    - ros: add the --beta flag back to ros and ros-updates
+
+ -- Renan Rodrigo <renanrodrigo@canonical.com>  Thu, 29 Sep 2022 16:20:42 -0300
+
+ubuntu-advantage-tools (27.11.1~22.10.1) kinetic; urgency=medium
+
+  * New upstream release 27.11.1: (LP: #1990907)
+    - Fix release upgrade when ESM packages are installed
+      + d/postinst: remove series information from the APT preferences template
+      + esm: remove series information from the APT preferences file
+
+ -- Renan Rodrigo <renanrodrigo@canonical.com>  Tue, 27 Sep 2022 16:19:41 -0300
+
+ubuntu-advantage-tools (27.11~22.10.1) kinetic; urgency=medium
+
+  * d/control:
+    - Update VCS references
+  * d/links:
+    - add usr/bin/pro as an alias to ubuntu-advantage
+  * d/postinst:
+    - include root_mode parameter when creating UAConfig instances
+    - change calls to add_notice to notice_file.add
+    - create public machine-token file if it does not exist
+  * New upstream release 27.11 (LP: #1989279)
+    - api:
+      + new `pro api` command to access the public client API
+      + 'version' endpoint returning version information
+      + 'should auto attach' endpoint informing if a system should run
+        auto-attach on startup
+      + 'full auto attach' endpoint performing auto-attach
+      + 'magic attach' endpoints for the Magic Attach flow
+    - auto-attach:
+      + better errors for invalid pro images (GH: #2180, #1833)
+      + don't detach on already auto-attached instances
+      + no-op when ubuntu-advantage information is present on cloud-init
+        userdata
+      + change systemd unit to run after cloud-config
+    - cli:
+      + cli: better error message on unrecognized flags (GH: #672)
+    - collect-logs:
+      + can now be executed as a non-root user
+      + is executed automatically and result is appended when using apport to
+        report a bug
+    - docs: now formatted to be built with sphinx, and published in readthedocs
+    - enable:
+      + new access-only flag for usecases where auto-install is undesired
+      + fix apt auth line replacement (LP: #1985863)
+    - esm-apps: generally available as non-beta as part of Ubuntu Pro
+    - fix: check if livepatch has already fixed a CVE before attempting a fix
+    - jobs: new timer job to check if the release reached end of support
+    - pro:
+      + Ubuntu Pro is released as a product
+      + make `pro` the recommended executable for the client
+      + client, apt and motd messages updated/rewritten to show Pro 
+        information
+      + base URL changed from /advantage to /pro
+      + ESM services renamed as part of Pro
+    - ros: released as a non-beta entitlement
+    - security-status
+      + does not require the --format flag anymore
+      + human readable output added based on ubuntu-security-status
+      + machine readable output contains CVEs fixed by Livepatch
+      + package counts include all esm-infra and esm-apps repositories
+    - status:
+      + don't show unavailable services by default (GH: #2156, #2159)
+      + expiry date formatted based on timezone (GH: #695)
+      + non-root users get the current status instead of a cached version
+      + --wait flag now working for non-root users
+    - version: warn about new available versions of the client in CLI command
+      output and API calls
+
+ -- Renan Rodrigo <renanrodrigo@canonical.com>  Thu, 08 Sep 2022 18:02:55 -0300
+
+ubuntu-advantage-tools (27.10.1~22.10.1) kinetic; urgency=medium
+
+  * apt-hook: Fix missing import warning when compiling
+
+ -- Lucas Moura <lucas.moura@canonical.com>  Tue, 09 Aug 2022 14:03:14 -0300
+
+ubuntu-advantage-tools (27.10~22.10.1) kinetic; urgency=medium
+
+  * d/control:
+    - Drop golang dependencies
+  * d/rules:
+    - Only install APT hooks on LTS series
+  * New upstream release 27.10 (LP: #1980990)
+    - apt-hook: replace golang with cpp for json-hook
+    - cli
+      + properly sort services for detach/attach (GH: #1831)
+      + collect-logs include rotated log files
+      + display UA features directly on status
+    - daemon: do not try enabling daemon during auto-attach (LP: #1980865)
+    - fix:
+      + update ua portal url when asking for attach
+      + add --dry-run option
+    - gcp-pro: better error message for metadata endpoint error
+    - requests: Add default timeout for web requests
+    - timer: log when job start running
+    - security-status: include download size of package updates
+
+ -- Lucas Moura <lucas.moura@canonical.com>  Fri, 01 Jul 2022 11:51:13 -0300
+
+ubuntu-advantage-tools (27.9~22.10.1) kinetic; urgency=medium
+
+  * d/rules
+    - remove trusty specific code
+    - remove ua-license-check.{timer,service,path}
+    - install ubuntu-advantage.service
+    - only on xenial: install ubuntu-advantage-cloud-id-shim.service
+  * d/tools.postinst
+    - remove trusty specific code
+    - print warnings if /etc/os-release doesn't have required fields
+    - hardcode service list instead of exec-ing python3 for old migration
+    - refactor python to avoid instantiating UAConfig extra times
+    - refactor python to always use messages module for strings
+    - rm the old marker file that triggered ua-license-check.path
+    - remove unnecessary deb-systemd-helper check in ua-messaging cleanup
+    - clean up old ua-license-check state
+    - run new cloud-id-shim script
+  * d/tools/postrm
+    - clean up ubuntu-advantage-daemon log files
+  * New upstream release 27.9 (LP: #1973099)
+    - cli:
+      + for json formatted output, include additional_info for some errors
+      + new subcommand `ua refresh messages` to update motd and apt messages
+    - daemon:
+      + replace ua-license-check timer with ubuntu-advantage.service daemon
+      + detects on-boot if pro license was added and runs auto-attach
+      + only runs on gcp and does not continuously long-poll by default for now
+    - enable:
+      + fix error message on wrong service name when unattached
+    - fips:
+      + allow enabling generic fips kernel on azure by default
+      + clean up fips reboot message (LP: #1972026)
+    - fix:
+      + handle errors during attach process
+      + fix bug where enable or detach during a fix failed (LP: #1969809)
+      + fix bug where attempting to fix some CVEs would never finish
+    - performance:
+      + remove unnecessary UAConfig object instantiation (also cleans up logs)
+      + cache "apt-cache policy" output to avoid unnecessary subp calls
+    - proxy:
+      + apt_http(s)_proxy renamed to global_apt_http(s)_proxy
+      + apt_http(s)_proxy config var names will still work
+      + new ua_apt_http(s)_proxy for only ua-related apt traffic (LP: #1956764)
+      + global_apt_http(s)_proxy and ua_apt_http(s)_proxy cannot be set at the
+        same time
+    - realtime: adjust warning to clarify that a manual revert is possible
+    - refresh: a normal `ua refresh` will also update motd and apt messages
+    - security-status: add counts of packages from each archive component
+    - status: check if contract has updated and notify user to run "ua refresh"
+
+ -- Grant Orndorff <grant.orndorff@canonical.com>  Wed, 11 May 2022 13:04:46 -0400
+
 ubuntu-advantage-tools (27.8~22.04.1) jammy; urgency=medium
 
   * New upstream release 27.8 (LP: #1969125)

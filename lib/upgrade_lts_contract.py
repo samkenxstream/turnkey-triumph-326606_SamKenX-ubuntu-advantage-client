@@ -27,33 +27,35 @@ import time
 from uaclient.cli import setup_logging
 from uaclient.config import UAConfig
 from uaclient.contract import process_entitlements_delta
-from uaclient.util import parse_os_release, subp
+from uaclient.defaults import ESM_APT_ROOTDIR
+from uaclient.system import ensure_folder_absent, parse_os_release, subp
 
 version_to_codename = {
     "14.04": "trusty",
     "16.04": "xenial",
     "18.04": "bionic",
     "20.04": "focal",
-    "21.10": "impish",
     "22.04": "jammy",
+    "22.10": "kinetic",
 }
 
+# We consider the past release for LTSs to be the last LTS,
+# because we don't have any services available on non-LTS.
+# This makes it safer for us to try to process contract deltas.
+# For example, we had "jammy": "focal" even when Impish was
+# still supported.
 current_codename_to_past_codename = {
     "xenial": "trusty",
     "bionic": "xenial",
     "focal": "bionic",
-    "impish": "focal",
-    # We are considering the past release for Jammy to be Focal
-    # because we don't have any services available on Impish.
-    # Therefore, it is safer for us to try to process contract deltas
-    # using Focal
     "jammy": "focal",
+    "kinetic": "jammy",
 }
 
 
 def process_contract_delta_after_apt_lock() -> None:
     logging.debug("Check whether to upgrade-lts-contract")
-    cfg = UAConfig()
+    cfg = UAConfig(root_mode=True)
     if not cfg.is_attached:
         logging.debug("Skipping upgrade-lts-contract. Machine is unattached")
         return
@@ -82,8 +84,13 @@ def process_contract_delta_after_apt_lock() -> None:
         logging.warning(msg)
         sys.exit(1)
 
-    past_entitlements = UAConfig(series=past_release).entitlements
-    new_entitlements = UAConfig(series=current_release).entitlements
+    past_entitlements = UAConfig(
+        series=past_release, root_mode=True
+    ).machine_token_file.entitlements
+    new_entitlements = UAConfig(
+        series=current_release,
+        root_mode=True,
+    ).machine_token_file.entitlements
 
     retry_count = 0
     while out:
@@ -110,6 +117,11 @@ def process_contract_delta_after_apt_lock() -> None:
     logging.debug(msg)
 
 
+def remove_private_esm_apt_cache():
+    ensure_folder_absent(ESM_APT_ROOTDIR)
+
+
 if __name__ == "__main__":
     setup_logging(logging.INFO, logging.DEBUG)
     process_contract_delta_after_apt_lock()
+    remove_private_esm_apt_cache()

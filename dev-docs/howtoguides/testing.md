@@ -24,7 +24,7 @@ autopkgtest -U --shell-fail . -- lxd ubuntu:xenial
 
 ## Integration Tests
 
-ubuntu-advantage-client uses [behave](https://behave.readthedocs.io)
+Ubuntu Pro Client uses [behave](https://behave.readthedocs.io)
 for its integration testing.
 
 The integration test definitions are stored in the `features/`
@@ -34,14 +34,23 @@ logic for those tests.
 
 By default, integration tests will do the following on a given cloud platform:
  * Launch an instance running latest daily image of the target Ubuntu release
- * Add the Ubuntu advantage client daily build PPA: [ppa:ua-client/daily](https://code.launchpad.net/~ua-client/+archive/ubuntu/daily)
+ * Add the Ubuntu Pro client daily build PPA: [ppa:ua-client/daily](https://code.launchpad.net/~ua-client/+archive/ubuntu/daily)
  * Install the appropriate ubuntu-advantage-tools and ubuntu-advantage-pro deb
  * Run the integration tests on that instance.
 
-The testing can be overridden to run using a local copy of the ubuntu-advantage-client source code instead of the daily PPA by providing the following environment variable to the behave test runner:
-```UACLIENT_BEHAVE_BUILD_PR=1```
+The testing can be overridden to install ubuntu-advantage-tools from other sources instead of the daily PPA by providing `UACLIENT_BEHAVE_INSTALL_FROM` to the behave test runner. The default is `UACLIENT_BEHAVE_INSTALL_FROM=daily`, and the other available options are:
 
-> Note that, by default, we cache the source even when `UACLIENT_BEHAVE_BUILD_PR=1`. This means that if you change the python code locally and want to run the behave tests against your new version, you need to either delete the cache (`rm /tmp/uaclient_behave`) or also set `UACLIENT_BEHAVE_CACHE_SOURCE=0`.
+- `staging`: install from the [staging PPA](https://code.launchpad.net/~ua-client/+archive/ubuntu/staging)
+- `stable`: install from the [stable PPA](https://code.launchpad.net/~ua-client/+archive/ubuntu/stable)
+- `archive`: install the latest version available in the archive, not adding any PPA
+- `proposed`: install the package from the -proposed pocket - specially useful for SRU testing (see [the release guide](how_to_release_a_new_version_of_ua.md))
+- `custom`: install from a custom provided PPA. If set, then two other variables need to be set: `UACLIENT_BEHAVE_CUSTOM_PPA=<PPA URL>` and `UACLIENT_BEHAVE_CUSTOM_PPA_KEYID=<signing key for the PPA>`.
+- `local`: install from a local copy of the ubuntu-advantage-client source code
+
+`local` is particularly useful, as it runs the suite against the local code, thus including and validating the latest changes made. It is advised to run any related integration tests against local code changes before pushing them to be reviewed.
+
+> **Note**
+> Note that we cache the source when running with `UACLIENT_BEHAVE_INSTALL_FROM=local` based on a hash, calculated from the repository state. If you change the python code locally and run the behave tests against your new version, there will be new debs in the cache source with the new repo state hash.
 
 To run the tests, you can use `tox`:
 
@@ -53,14 +62,14 @@ or, if you just want to run a specific file, or a test within a file:
 
 ```shell
 tox -e behave-lxd-20.04 features/unattached_commands.feature
-tox -e behave-lxd-20.04 features/unattached_commands.feature:55
+tox -e behave-lxd-20.04 features/unattached_commands.feature:28
 ```
 
 As can be seen, this will run behave tests only for release 20.04 (Focal Fossa). We are currently
 supporting 5 distinct releases:
 
+* 21.10 (Kinetic Kudu)
 * 22.04 (Jammy Jellyfish)
-* 21.10 (Impish Indri)
 * 20.04 (Focal Fossa)
 * 18.04 (Bionic Beaver)
 * 16.04 (Xenial Xerus)
@@ -117,14 +126,6 @@ image build step).
 performed in `features/environment.py`, so don't expect to find
 documentation about it outside of this codebase.)
 
-For development purposes there is `reuse_container` option.
-If you would like to run behave tests in an existing container
-you need to add `-D reuse_container=container_name`:
-
-```sh
-tox -e behave -D reuse_container=container_name
-```
-
 ## Optimizing total run time of integration tests with snapshots
 When `UACLIENT_BEHAVE_SNAPSHOT_STRATEGY=1` we create a snapshot of an instance
 with ubuntu-advantage-tools installed and restore from that snapshot for all tests.
@@ -166,7 +167,7 @@ file](https://github.com/canonical/pycloudlib/blob/main/pycloudlib.toml.template
 the required EC2 credentials.
 
 To specifically run non-ubuntu pro tests using canonical cloud-images an
-additional token obtained from https://ubuntu.com/advantage needs to be set:
+additional token obtained from https://ubuntu.com/pro needs to be set:
   - UACLIENT_BEHAVE_CONTRACT_TOKEN=<your_token>
 
 By default, the public AMIs for Ubuntu Pro testing used for each Ubuntu
@@ -209,7 +210,7 @@ file](https://github.com/canonical/pycloudlib/blob/main/pycloudlib.toml.template
 the required Azure credentials.
 
 To specifically run non-ubuntu pro tests using canonical cloud-images an
-additional token obtained from https://ubuntu.com/advantage needs to be set:
+additional token obtained from https://ubuntu.com/pro needs to be set:
   - UACLIENT_BEHAVE_CONTRACT_TOKEN=<your_token>
 
 * To manually run Azure integration tests with a specific Image Id provide the
@@ -241,7 +242,7 @@ file](https://github.com/canonical/pycloudlib/blob/main/pycloudlib.toml.template
 the required GCP credentials.
 
 To specifically run non-ubuntu pro tests using canonical cloud-images an
-additional token obtained from https://ubuntu.com/advantage needs to be set:
+additional token obtained from https://ubuntu.com/pro needs to be set:
   - UACLIENT_BEHAVE_CONTRACT_TOKEN=<your_token>
 
 * To manually run GCP integration tests with a specific Image Id provide the

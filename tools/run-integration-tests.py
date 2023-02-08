@@ -12,8 +12,9 @@ SERIES_TO_VERSION = {
     "xenial": "16.04",
     "bionic": "18.04",
     "focal": "20.04",
-    "impish": "21.10",
     "jammy": "22.04",
+    "kinetic": "22.10",
+    "lunar": "23.04",
 }
 
 TOKEN_TO_ENVVAR = {
@@ -23,18 +24,19 @@ TOKEN_TO_ENVVAR = {
 }
 
 PLATFORM_SERIES_TESTS = {
-    "azuregeneric": ["xenial", "bionic", "focal"],
-    "azurepro": ["xenial", "bionic", "focal"],
+    "azuregeneric": ["xenial", "bionic", "focal", "jammy"],
+    "azurepro": ["xenial", "bionic", "focal", "jammy"],
     "azurepro-fips": ["xenial", "bionic", "focal"],
-    "awsgeneric": ["xenial", "bionic", "focal"],
-    "awspro": ["xenial", "bionic", "focal"],
+    "awsgeneric": ["xenial", "bionic", "focal", "jammy"],
+    "awspro": ["xenial", "bionic", "focal", "jammy"],
     "awspro-fips": ["xenial", "bionic", "focal"],
     "docker": ["focal"],
-    "gcpgeneric": ["xenial", "bionic", "focal", "impish", "jammy"],
-    "gcppro": ["xenial", "bionic", "focal"],
-    "lxd": ["xenial", "bionic", "focal", "impish", "jammy"],
-    "vm": ["xenial", "bionic", "focal"],
-    "upgrade": ["xenial", "bionic", "focal", "impish"],
+    "gcpgeneric": ["xenial", "bionic", "focal", "jammy", "kinetic"],
+    "gcppro": ["xenial", "bionic", "focal", "jammy"],
+    "gcppro-fips": ["bionic", "focal"],
+    "lxd": ["xenial", "bionic", "focal", "jammy", "kinetic", "lunar"],
+    "vm": ["xenial", "bionic", "focal", "jammy"],
+    "upgrade": ["xenial", "bionic", "focal", "jammy", "kinetic"],
 }
 
 
@@ -43,7 +45,7 @@ def is_compatible(platform, series):
 
 
 def build_commands(
-    platform, series, proposed, check_version, token, credentials_path, wip
+    platform, series, install_from, check_version, token, credentials_path, wip
 ):
     with open(credentials_path) as f:
         credentials = yaml.safe_load(f)
@@ -61,19 +63,13 @@ def build_commands(
                         check_version, series_version
                     )
 
-                # If not told to run from proposed, run from local changes
-                if proposed:
-                    env["UACLIENT_BEHAVE_ENABLE_PROPOSED"] = "1"
-                else:
-                    env["UACLIENT_BEHAVE_BUILD_PR"] = "1"
+                # choose the appropriate installation source for the deb
+                env["UACLIENT_BEHAVE_INSTALL_FROM"] = install_from
 
                 # Inject tokens from credentials
                 for t in token:
                     envvar = TOKEN_TO_ENVVAR[t]
                     env[envvar] = credentials["token"].get(envvar)
-
-                # Until we don't get sbuild to run just once per run,
-                env["UACLIENT_BEHAVE_SNAPSHOT_STRATEGY"] = "1"
 
                 # Tox command itself
                 command = "tox -e behave-{}-{}".format(
@@ -115,11 +111,20 @@ def build_commands(
     help="Tokens to use for the tests (require tokens in the credentials file)",
 )
 @click.option(
-    "--proposed",
-    type=bool,
-    default=False,
-    is_flag=True,
-    help="Run tests based on existing packages in the Proposed pocket",
+    "--install-from",
+    type=click.Choice(
+        (
+            "archive",
+            "local",
+            "daily",
+            "staging",
+            "stable",
+            "proposed",
+            "custom",
+        )
+    ),
+    default="local",
+    help="Choose the installation source for the uaclient deb",
 )
 @click.option(
     "--check-version",
@@ -142,10 +147,16 @@ def build_commands(
     help="Run only tests with the @wip decorator",
 )
 def run_tests(
-    platform, series, proposed, check_version, token, credentials_path, wip
+    platform, series, install_from, check_version, token, credentials_path, wip
 ):
     commands = build_commands(
-        platform, series, proposed, check_version, token, credentials_path, wip
+        platform,
+        series,
+        install_from,
+        check_version,
+        token,
+        credentials_path,
+        wip,
     )
     current_datetime = datetime.now().strftime(format="%b-%d-%H%M")
     output_dir = "test-results/{}".format(current_datetime)
@@ -179,7 +190,7 @@ def run_tests(
                 processes.remove(process)
         time.sleep(5)
 
-    if proposed and not error:
+    if install_from == "proposed" and not error:
         filename = "test-results-{}.tar.gz".format(current_datetime)
         with tarfile.open(filename, "w:gz") as results:
             results.add(output_dir, arcname="test-results/")

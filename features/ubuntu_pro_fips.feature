@@ -13,24 +13,23 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         features:
           allow_xenial_fips_on_cloud: true
         """
-        And I run `ua auto-attach` with sudo
-        And I run `ua status --wait` as non-root
-        And I run `ua status` as non-root
+        And I run `pro auto-attach` with sudo
+        And I run `pro status --wait` as non-root
+        And I run `pro status` as non-root
         Then stdout matches regexp:
-            """
-            esm-apps      +yes +enabled +UA Apps: Extended Security Maintenance \(ESM\)
-            esm-infra     +yes +enabled +UA Infra: Extended Security Maintenance \(ESM\)
-            fips          +yes +enabled +NIST-certified core packages
-            fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
-            livepatch     +yes +n/a  +Canonical Livepatch service
-            """
+        """
+        esm-apps      +yes +enabled +Expanded Security Maintenance for Applications
+        esm-infra     +yes +enabled +Expanded Security Maintenance for Infrastructure
+        fips          +yes +enabled +NIST-certified core packages
+        fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
+        """
         And I verify that running `apt update` `with sudo` exits `0`
         And I verify that running `grep Traceback /var/log/ubuntu-advantage.log` `with sudo` exits `1`
         When I run `uname -r` as non-root
         Then stdout matches regexp:
-            """
-            <fips-kernel-version>
-            """
+        """
+        <fips-kernel-version>
+        """
         When I run `apt-cache policy ubuntu-azure-fips` as non-root
         Then stdout does not match regexp:
         """
@@ -49,12 +48,15 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         """
         And stdout matches regexp:
         """
-        Skipping attach: Instance '[0-9a-z\-]+' is already attached.
+        Active: inactive \(dead\).*
+        \s*Condition: start condition failed.*
+        .*ConditionPathExists=!/var/lib/ubuntu-advantage/private/machine-token.json was not met
         """
-        When I run `ua auto-attach` with sudo
+        When I verify that running `pro auto-attach` `with sudo` exits `2`
         Then stderr matches regexp:
         """
-        Skipping attach: Instance '[0-9a-z\-]+' is already attached.
+        This machine is already attached to '.*'
+        To use a different subscription first run: sudo pro detach.
         """
         When I run `apt-cache policy` with sudo
         Then apt-cache policy for the following url has permission `500`
@@ -97,28 +99,33 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         \s*\*\*\* .* 500
         \s*500 https://esm.ubuntu.com/apps/ubuntu <release>-apps-security/main amd64 Packages
         """
-        When I run `ua enable fips-updates --assume-yes` with sudo
+        When I run `pro enable fips-updates --assume-yes` with sudo
         Then I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            Disabling incompatible service: FIPS
-            Updating package lists
-            Installing FIPS Updates packages
-            FIPS Updates enabled
-            A reboot is required to complete install.
-            """
-        When I run `ua status` with sudo
+        """
+        One moment, checking your subscription first
+        Disabling incompatible service: FIPS
+        Updating package lists
+        Installing FIPS Updates packages
+        FIPS Updates enabled
+        A reboot is required to complete install.
+        """
+        When I run `pro status` with sudo
         Then stdout matches regexp:
-            """
-            fips          +yes +n/a +NIST-certified core packages
-            fips-updates  +yes +enabled +NIST-certified core packages with priority security updates
-            """
-        When I reboot the `<release>` machine
+        """
+        fips-updates  +yes +enabled +NIST-certified core packages with priority security updates
+        """
+        And stdout matches regexp:
+        """
+        NOTICES
+        Disabling FIPS requires system reboot to complete operation.
+        FIPS support requires system reboot to complete configuration.
+        """
+        When I reboot the machine
         And I run `uname -r` as non-root
         Then stdout matches regexp:
-            """
-            <fips-kernel-version>
-            """
+        """
+        <fips-kernel-version>
+        """
         When I run `apt-cache policy ubuntu-azure-fips` as non-root
         Then stdout does not match regexp:
         """
@@ -128,6 +135,12 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         Then I will see the following on stdout:
         """
         1
+        """
+        When I run `pro status` with sudo
+        Then stdout does not match regexp:
+        """
+        NOTICES
+        FIPS support requires system reboot to complete configuration.
         """
 
         Examples: ubuntu release
@@ -146,20 +159,17 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         data_dir: /var/lib/ubuntu-advantage
         log_level: debug
         log_file: /var/log/ubuntu-advantage.log
-        features:
-          allow_xenial_fips_on_cloud: true
         """
-        And I run `ua auto-attach` with sudo
-        And I run `ua status --wait` as non-root
-        And I run `ua status` as non-root
+        And I run `pro auto-attach` with sudo
+        And I run `pro status --wait` as non-root
+        And I run `pro status` as non-root
         Then stdout matches regexp:
-            """
-            esm-apps      +yes +enabled +UA Apps: Extended Security Maintenance \(ESM\)
-            esm-infra     +yes +enabled +UA Infra: Extended Security Maintenance \(ESM\)
-            fips          +yes +enabled +NIST-certified core packages
-            fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
-            livepatch     +yes +n/a  +Canonical Livepatch service
-            """
+        """
+        esm-apps      +yes +enabled +Expanded Security Maintenance for Applications
+        esm-infra     +yes +enabled +Expanded Security Maintenance for Infrastructure
+        fips          +yes +enabled +NIST-certified core packages
+        fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
+        """
         And I verify that running `apt update` `with sudo` exits `0`
         And I verify that running `grep Traceback /var/log/ubuntu-advantage.log` `with sudo` exits `1`
         And I verify that `openssh-server` is installed from apt source `<fips-apt-source>`
@@ -185,17 +195,16 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         features:
           allow_xenial_fips_on_cloud: true
         """
-        And I run `ua auto-attach` with sudo
-        And I run `ua status --wait` as non-root
-        And I run `ua status` as non-root
+        And I run `pro auto-attach` with sudo
+        And I run `pro status --wait` as non-root
+        And I run `pro status` as non-root
         Then stdout matches regexp:
-            """
-            esm-apps      +yes +enabled +UA Apps: Extended Security Maintenance \(ESM\)
-            esm-infra     +yes +enabled +UA Infra: Extended Security Maintenance \(ESM\)
-            fips          +yes +enabled +NIST-certified core packages
-            fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
-            livepatch     +yes +n/a  +Canonical Livepatch service
-            """
+        """
+        esm-apps      +yes +enabled +Expanded Security Maintenance for Applications
+        esm-infra     +yes +enabled +Expanded Security Maintenance for Infrastructure
+        fips          +yes +enabled +NIST-certified core packages
+        fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
+        """
         And I verify that running `apt update` `with sudo` exits `0`
         And I verify that running `grep Traceback /var/log/ubuntu-advantage.log` `with sudo` exits `1`
         And I verify that `openssh-server` is installed from apt source `<fips-apt-source>`
@@ -221,24 +230,23 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         log_level: debug
         log_file: /var/log/ubuntu-advantage.log
         """
-        And I run `ua auto-attach` with sudo
-        And I run `ua status --wait` as non-root
-        And I run `ua status` as non-root
+        And I run `pro auto-attach` with sudo
+        And I run `pro status --wait` as non-root
+        And I run `pro status` as non-root
         Then stdout matches regexp:
-            """
-            esm-apps      +yes +enabled +UA Apps: Extended Security Maintenance \(ESM\)
-            esm-infra     +yes +enabled +UA Infra: Extended Security Maintenance \(ESM\)
-            fips          +yes +enabled +NIST-certified core packages
-            fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
-            livepatch     +yes +n/a  +Canonical Livepatch service
-            """
+        """
+        esm-apps      +yes +enabled +Expanded Security Maintenance for Applications
+        esm-infra     +yes +enabled +Expanded Security Maintenance for Infrastructure
+        fips          +yes +enabled +NIST-certified core packages
+        fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
+        """
         And I verify that running `apt update` `with sudo` exits `0`
         And I verify that running `grep Traceback /var/log/ubuntu-advantage.log` `with sudo` exits `1`
         When I run `uname -r` as non-root
         Then stdout matches regexp:
-            """
-            <fips-kernel-version>
-            """
+        """
+        <fips-kernel-version>
+        """
         When I run `apt-cache policy ubuntu-aws-fips` as non-root
         Then stdout does not match regexp:
         """
@@ -257,12 +265,15 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         """
         And stdout matches regexp:
         """
-        Skipping attach: Instance '[0-9a-z\-]+' is already attached.
+        Active: inactive \(dead\).*
+        \s*Condition: start condition failed.*
+        .*ConditionPathExists=!/var/lib/ubuntu-advantage/private/machine-token.json was not met
         """
-        When I run `ua auto-attach` with sudo
+        When I verify that running `pro auto-attach` `with sudo` exits `2`
         Then stderr matches regexp:
         """
-        Skipping attach: Instance '[0-9a-z\-]+' is already attached.
+        This machine is already attached to '.*'
+        To use a different subscription first run: sudo pro detach.
         """
         When I run `apt-cache policy` with sudo
         Then apt-cache policy for the following url has permission `500`
@@ -305,28 +316,33 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         \s*\*\*\* .* 500
         \s*500 https://esm.ubuntu.com/apps/ubuntu <release>-apps-security/main amd64 Packages
         """
-        When I run `ua enable fips-updates --assume-yes` with sudo
+        When I run `pro enable fips-updates --assume-yes` with sudo
         Then I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            Disabling incompatible service: FIPS
-            Updating package lists
-            Installing FIPS Updates packages
-            FIPS Updates enabled
-            A reboot is required to complete install.
-            """
-        When I run `ua status` with sudo
+        """
+        One moment, checking your subscription first
+        Disabling incompatible service: FIPS
+        Updating package lists
+        Installing FIPS Updates packages
+        FIPS Updates enabled
+        A reboot is required to complete install.
+        """
+        When I run `pro status` with sudo
         Then stdout matches regexp:
-            """
-            fips          +yes +n/a +NIST-certified core packages
-            fips-updates  +yes +enabled +NIST-certified core packages with priority security updates
-            """
-        When I reboot the `<release>` machine
+        """
+        fips-updates  +yes +enabled +NIST-certified core packages with priority security updates
+        """
+        And stdout matches regexp:
+        """
+        NOTICES
+        Disabling FIPS requires system reboot to complete operation.
+        FIPS support requires system reboot to complete configuration.
+        """
+        When I reboot the machine
         And I run `uname -r` as non-root
         Then stdout matches regexp:
-            """
-            <fips-kernel-version>
-            """
+        """
+        <fips-kernel-version>
+        """
         When I run `apt-cache policy ubuntu-aws-fips` as non-root
         Then stdout does not match regexp:
         """
@@ -336,6 +352,12 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         Then I will see the following on stdout:
         """
         1
+        """
+        When I run `pro status` with sudo
+        Then stdout does not match regexp:
+        """
+        NOTICES
+        FIPS support requires system reboot to complete configuration.
         """
 
         Examples: ubuntu release
@@ -354,20 +376,17 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         data_dir: /var/lib/ubuntu-advantage
         log_level: debug
         log_file: /var/log/ubuntu-advantage.log
-        features:
-          allow_xenial_fips_on_cloud: true
         """
-        And I run `ua auto-attach` with sudo
-        And I run `ua status --wait` as non-root
-        And I run `ua status` as non-root
+        And I run `pro auto-attach` with sudo
+        And I run `pro status --wait` as non-root
+        And I run `pro status` as non-root
         Then stdout matches regexp:
-            """
-            esm-apps      +yes +enabled +UA Apps: Extended Security Maintenance \(ESM\)
-            esm-infra     +yes +enabled +UA Infra: Extended Security Maintenance \(ESM\)
-            fips          +yes +enabled +NIST-certified core packages
-            fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
-            livepatch     +yes +n/a  +Canonical Livepatch service
-            """
+        """
+        esm-apps      +yes +enabled +Expanded Security Maintenance for Applications
+        esm-infra     +yes +enabled +Expanded Security Maintenance for Infrastructure
+        fips          +yes +enabled +NIST-certified core packages
+        fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
+        """
         And I verify that running `apt update` `with sudo` exits `0`
         And I verify that running `grep Traceback /var/log/ubuntu-advantage.log` `with sudo` exits `1`
         And I verify that `openssh-server` is installed from apt source `<fips-apt-source>`
@@ -393,17 +412,16 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         features:
           allow_xenial_fips_on_cloud: true
         """
-        And I run `ua auto-attach` with sudo
-        And I run `ua status --wait` as non-root
-        And I run `ua status` as non-root
+        And I run `pro auto-attach` with sudo
+        And I run `pro status --wait` as non-root
+        And I run `pro status` as non-root
         Then stdout matches regexp:
-            """
-            esm-apps      +yes +enabled +UA Apps: Extended Security Maintenance \(ESM\)
-            esm-infra     +yes +enabled +UA Infra: Extended Security Maintenance \(ESM\)
-            fips          +yes +enabled +NIST-certified core packages
-            fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
-            livepatch     +yes +n/a  +Canonical Livepatch service
-            """
+        """
+        esm-apps      +yes +enabled +Expanded Security Maintenance for Applications
+        esm-infra     +yes +enabled +Expanded Security Maintenance for Infrastructure
+        fips          +yes +enabled +NIST-certified core packages
+        fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
+        """
         And I verify that running `apt update` `with sudo` exits `0`
         And I verify that running `grep Traceback /var/log/ubuntu-advantage.log` `with sudo` exits `1`
         And I verify that `openssh-server` is installed from apt source `<fips-apt-source>`
@@ -431,15 +449,15 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         log_level: debug
         log_file: /var/log/ubuntu-advantage.log
         """
-        And I run `ua auto-attach` with sudo
-        And I run `ua status --wait` as non-root
-        And I run `ua status` as non-root
+        And I run `pro auto-attach` with sudo
+        And I run `pro status --wait` as non-root
+        And I run `pro status` as non-root
         Then stdout matches regexp:
         """
         fips          +yes +enabled +NIST-certified core packages
         fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
         """
-        When I run `ua enable fips-updates --assume-yes` with sudo
+        When I run `pro enable fips-updates --assume-yes` with sudo
         Then stdout matches regexp:
         """
         One moment, checking your subscription first
@@ -449,13 +467,12 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         FIPS Updates enabled
         A reboot is required to complete install.
         """
-        When I run `ua status` with sudo
+        When I run `pro status` with sudo
         Then stdout matches regexp:
         """
-        fips          +yes +n/a +NIST-certified core packages
         fips-updates  +yes +enabled +NIST-certified core packages with priority security updates
         """
-        When I reboot the `<release>` machine
+        When I reboot the machine
         And  I run `uname -r` as non-root
         Then stdout matches regexp:
         """
@@ -483,24 +500,23 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         log_level: debug
         log_file: /var/log/ubuntu-advantage.log
         """
-        And I run `ua auto-attach` with sudo
-        And I run `ua status --wait` as non-root
-        And I run `ua status` as non-root
+        And I run `pro auto-attach` with sudo
+        And I run `pro status --wait` as non-root
+        And I run `pro status` as non-root
         Then stdout matches regexp:
-            """
-            esm-apps      +yes +enabled +UA Apps: Extended Security Maintenance \(ESM\)
-            esm-infra     +yes +enabled +UA Infra: Extended Security Maintenance \(ESM\)
-            fips          +yes +enabled +NIST-certified core packages
-            fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
-            livepatch     +yes +n/a  +Canonical Livepatch service
-            """
+        """
+        esm-apps      +yes +enabled +Expanded Security Maintenance for Applications
+        esm-infra     +yes +enabled +Expanded Security Maintenance for Infrastructure
+        fips          +yes +enabled +NIST-certified core packages
+        fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
+        """
         And I verify that running `apt update` `with sudo` exits `0`
         And I verify that running `grep Traceback /var/log/ubuntu-advantage.log` `with sudo` exits `1`
         When I run `uname -r` as non-root
         Then stdout matches regexp:
-            """
-            <fips-kernel-version>
-            """
+        """
+        <fips-kernel-version>
+        """
         When I run `apt-cache policy ubuntu-gcp-fips` as non-root
         Then stdout does not match regexp:
         """
@@ -519,12 +535,15 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         """
         And stdout matches regexp:
         """
-        Skipping attach: Instance '[0-9a-z\-]+' is already attached.
+        Active: inactive \(dead\).*
+        \s*Condition: start condition failed.*
+        .*ConditionPathExists=!/var/lib/ubuntu-advantage/private/machine-token.json was not met
         """
-        When I run `ua auto-attach` with sudo
+        When I verify that running `pro auto-attach` `with sudo` exits `2`
         Then stderr matches regexp:
         """
-        Skipping attach: Instance '[0-9a-z\-]+' is already attached.
+        This machine is already attached to '.*'
+        To use a different subscription first run: sudo pro detach.
         """
         When I run `apt-cache policy` with sudo
         Then apt-cache policy for the following url has permission `500`
@@ -567,28 +586,33 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         \s*\*\*\* .* 500
         \s*500 https://esm.ubuntu.com/apps/ubuntu <release>-apps-security/main amd64 Packages
         """
-        When I run `ua enable fips-updates --assume-yes` with sudo
+        When I run `pro enable fips-updates --assume-yes` with sudo
         Then I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            Disabling incompatible service: FIPS
-            Updating package lists
-            Installing FIPS Updates packages
-            FIPS Updates enabled
-            A reboot is required to complete install.
-            """
-        When I run `ua status` with sudo
+        """
+        One moment, checking your subscription first
+        Disabling incompatible service: FIPS
+        Updating package lists
+        Installing FIPS Updates packages
+        FIPS Updates enabled
+        A reboot is required to complete install.
+        """
+        When I run `pro status` with sudo
         Then stdout matches regexp:
-            """
-            fips          +yes +n/a +NIST-certified core packages
-            fips-updates  +yes +enabled +NIST-certified core packages with priority security updates
-            """
-        When I reboot the `<release>` machine
+        """
+        fips-updates  +yes +enabled +NIST-certified core packages with priority security updates
+        """
+        And stdout matches regexp:
+        """
+        NOTICES
+        Disabling FIPS requires system reboot to complete operation.
+        FIPS support requires system reboot to complete configuration.
+        """
+        When I reboot the machine
         And I run `uname -r` as non-root
         Then stdout matches regexp:
-            """
-            <fips-kernel-version>
-            """
+        """
+        <fips-kernel-version>
+        """
         When I run `apt-cache policy ubuntu-gcp-fips` as non-root
         Then stdout does not match regexp:
         """
@@ -598,6 +622,12 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         Then I will see the following on stdout:
         """
         1
+        """
+        When I run `pro status` with sudo
+        Then stdout does not match regexp:
+        """
+        NOTICES
+        FIPS support requires system reboot to complete configuration.
         """
 
         Examples: ubuntu release
@@ -615,20 +645,17 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         data_dir: /var/lib/ubuntu-advantage
         log_level: debug
         log_file: /var/log/ubuntu-advantage.log
-        features:
-          allow_xenial_fips_on_cloud: true
         """
-        And I run `ua auto-attach` with sudo
-        And I run `ua status --wait` as non-root
-        And I run `ua status` as non-root
+        And I run `pro auto-attach` with sudo
+        And I run `pro status --wait` as non-root
+        And I run `pro status` as non-root
         Then stdout matches regexp:
-            """
-            esm-apps      +yes +enabled +UA Apps: Extended Security Maintenance \(ESM\)
-            esm-infra     +yes +enabled +UA Infra: Extended Security Maintenance \(ESM\)
-            fips          +yes +enabled +NIST-certified core packages
-            fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
-            livepatch     +yes +n/a  +Canonical Livepatch service
-            """
+        """
+        esm-apps      +yes +enabled +Expanded Security Maintenance for Applications
+        esm-infra     +yes +enabled +Expanded Security Maintenance for Infrastructure
+        fips          +yes +enabled +NIST-certified core packages
+        fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
+        """
         And I verify that running `apt update` `with sudo` exits `0`
         And I verify that running `grep Traceback /var/log/ubuntu-advantage.log` `with sudo` exits `1`
         And I verify that `openssh-server` is installed from apt source `<fips-apt-source>`
@@ -650,20 +677,17 @@ Feature: Command behaviour when auto-attached in an ubuntu PRO fips image
         data_dir: /var/lib/ubuntu-advantage
         log_level: debug
         log_file: /var/log/ubuntu-advantage.log
-        features:
-          allow_xenial_fips_on_cloud: true
         """
-        And I run `ua auto-attach` with sudo
-        And I run `ua status --wait` as non-root
-        And I run `ua status` as non-root
+        And I run `pro auto-attach` with sudo
+        And I run `pro status --wait` as non-root
+        And I run `pro status` as non-root
         Then stdout matches regexp:
-            """
-            esm-apps      +yes +enabled +UA Apps: Extended Security Maintenance \(ESM\)
-            esm-infra     +yes +enabled +UA Infra: Extended Security Maintenance \(ESM\)
-            fips          +yes +enabled +NIST-certified core packages
-            fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
-            livepatch     +yes +n/a  +Canonical Livepatch service
-            """
+        """
+        esm-apps      +yes +enabled +Expanded Security Maintenance for Applications
+        esm-infra     +yes +enabled +Expanded Security Maintenance for Infrastructure
+        fips          +yes +enabled +NIST-certified core packages
+        fips-updates  +yes +disabled +NIST-certified core packages with priority security updates
+        """
         And I verify that running `apt update` `with sudo` exits `0`
         And I verify that running `grep Traceback /var/log/ubuntu-advantage.log` `with sudo` exits `1`
         And I verify that `openssh-server` is installed from apt source `<fips-apt-source>`

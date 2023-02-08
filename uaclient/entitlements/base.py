@@ -1,14 +1,13 @@
 import abc
 import logging
 import os
-import re
 import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import yaml
 
-from uaclient import config, contract, event_logger, exceptions, messages, util
+from uaclient import config, contract, event_logger, messages, system, util
 from uaclient.defaults import DEFAULT_HELP_FILE
 from uaclient.entitlements.entitlement_status import (
     ApplicabilityStatus,
@@ -22,11 +21,6 @@ from uaclient.entitlements.entitlement_status import (
 )
 from uaclient.types import MessagingOperationsDict, StaticAffordance
 from uaclient.util import is_config_value_true
-
-RE_KERNEL_UNAME = (
-    r"(?P<major>[\d]+)[.-](?P<minor>[\d]+)[.-](?P<patch>[\d]+\-[\d]+)"
-    r"-(?P<flavor>[A-Za-z0-9_-]+)"
-)
 
 event = event_logger.get_event_logger()
 
@@ -52,6 +46,9 @@ class UAEntitlement(metaclass=abc.ABCMeta):
     # Whether that entitlement is in beta stage
     is_beta = False
 
+    # Whether the entitlement supports the --access-only flag
+    supports_access_only = False
+
     # Help info message for the entitlement
     _help_info = None  # type: str
 
@@ -59,10 +56,15 @@ class UAEntitlement(metaclass=abc.ABCMeta):
     _incompatible_services = ()  # type: Tuple[IncompatibleService, ...]
 
     # List of services that must be active before enabling this service
-    _required_services = ()  # type: Tuple[str, ...]
+    _required_services = ()  # type: Tuple[Type[UAEntitlement], ...]
 
     # List of services that depend on this service
-    _dependent_services = ()  # type: Tuple[str, ...]
+    _dependent_services = ()  # type: Tuple[Type[UAEntitlement], ...]
+
+    affordance_check_arch = True
+    affordance_check_series = True
+    affordance_check_kernel_min_version = True
+    affordance_check_kernel_flavor = True
 
     @property
     @abc.abstractmethod
@@ -93,12 +95,15 @@ class UAEntitlement(metaclass=abc.ABCMeta):
     @property
     def presentation_name(self) -> str:
         """The user-facing name shown for this entitlement"""
-        return (
-            self.cfg.entitlements.get(self.name, {})
-            .get("entitlement", {})
-            .get("affordances", {})
-            .get("presentedAs", self.name)
-        )
+        if self.cfg.machine_token_file.is_present:
+            return (
+                self.cfg.machine_token_file.entitlements.get(self.name, {})
+                .get("entitlement", {})
+                .get("affordances", {})
+                .get("presentedAs", self.name)
+            )
+        else:
+            return self.name
 
     @property
     def help_info(self) -> str:
@@ -132,7 +137,7 @@ class UAEntitlement(metaclass=abc.ABCMeta):
         return self._incompatible_services
 
     @property
-    def required_services(self) -> Tuple[str, ...]:
+    def required_services(self) -> Tuple[Type["UAEntitlement"], ...]:
         """
         Return a list of packages that must be active before enabling this
         service. When we are enabling the entitlement we can directly ask
@@ -142,7 +147,7 @@ class UAEntitlement(metaclass=abc.ABCMeta):
         return self._required_services
 
     @property
-    def dependent_services(self) -> Tuple[str, ...]:
+    def dependent_services(self) -> Tuple[Type["UAEntitlement"], ...]:
         """
         Return a list of packages that depend on this service.
         We will use that list during disable operations, where
@@ -164,18 +169,21 @@ class UAEntitlement(metaclass=abc.ABCMeta):
         assume_yes: bool = False,
         allow_beta: bool = False,
         called_name: str = "",
+        access_only: bool = False,
     ) -> None:
         """Setup UAEntitlement instance
 
         @param config: Parsed configuration dictionary
         """
         if not cfg:
-            cfg = config.UAConfig()
+            root_mode = os.getuid() == 0
+            cfg = config.UAConfig(root_mode=root_mode)
         self.cfg = cfg
         self.assume_yes = assume_yes
         self.allow_beta = allow_beta
+        self.access_only = access_only
         self._called_name = called_name
-        self._valid_service = None
+        self._valid_service = None  # type: Optional[bool]
 
     @property
     def valid_service(self):
@@ -188,104 +196,6 @@ class UAEntitlement(metaclass=abc.ABCMeta):
             )
 
         return self._valid_service
-
-    # using Union instead of Optional here to signal that it may expand to
-    # support additional reason types in the future.
-    def enable(
-        self, silent: bool = False
-    ) -> Tuple[bool, Union[None, CanEnableFailure]]:
-        """Enable specific entitlement.
-
-        @return: tuple of (success, optional reason)
-            (True, None) on success.
-            (False, reason) otherwise. reason is only non-None if it is a
-                populated CanEnableFailure reason. This may expand to
-                include other types of reasons in the future.
-        """
-
-        msg_ops = self.messaging.get("pre_can_enable", [])
-        if not util.handle_message_operations(msg_ops):
-            return False, None
-
-        can_enable, fail = self.can_enable()
-        if not can_enable:
-            if fail is None:
-                # this shouldn't happen, but if it does we shouldn't continue
-                return False, None
-            elif fail.reason == CanEnableFailureReason.INCOMPATIBLE_SERVICE:
-                # Try to disable those services before proceeding with enable
-                incompat_ret, error = self.handle_incompatible_services()
-                if not incompat_ret:
-                    fail.message = error
-                    return False, fail
-            elif (
-                fail.reason
-                == CanEnableFailureReason.INACTIVE_REQUIRED_SERVICES
-            ):
-                # Try to enable those services before proceeding with enable
-                req_ret, error = self._enable_required_services()
-                if not req_ret:
-                    fail.message = error
-                    return False, fail
-            else:
-                # every other reason means we can't continue
-                return False, fail
-
-        msg_ops = self.messaging.get("pre_enable", [])
-        if not util.handle_message_operations(msg_ops):
-            return False, None
-
-        ret = self._perform_enable(silent=silent)
-        if not ret:
-            return False, None
-
-        msg_ops = self.messaging.get("post_enable", [])
-        if not util.handle_message_operations(msg_ops):
-            return False, None
-
-        return True, None
-
-    @abc.abstractmethod
-    def _perform_enable(self, silent: bool = False) -> bool:
-        """
-        Enable specific entitlement. This should be implemented by subclasses.
-        This method does the actual enablement, and does not check can_enable
-        or handle pre_enable or post_enable messaging.
-
-        @return: True on success, False otherwise.
-        """
-        pass
-
-    def can_disable(
-        self, ignore_dependent_services: bool = False
-    ) -> Tuple[bool, Optional[CanDisableFailure]]:
-        """Report whether or not disabling is possible for the entitlement.
-
-        :return:
-            (True, None) if can disable
-            (False, CanDisableFailure) if can't disable
-        """
-        application_status, _ = self.application_status()
-
-        if application_status == ApplicationStatus.DISABLED:
-            return (
-                False,
-                CanDisableFailure(
-                    CanDisableFailureReason.ALREADY_DISABLED,
-                    message=messages.ALREADY_DISABLED.format(title=self.title),
-                ),
-            )
-
-        if self.dependent_services and not ignore_dependent_services:
-            if self.detect_dependent_services():
-                return (
-                    False,
-                    CanDisableFailure(
-                        CanDisableFailureReason.ACTIVE_DEPENDENT_SERVICES
-                    ),
-                )
-
-        return True, None
 
     def can_enable(self) -> Tuple[bool, Optional[CanEnableFailure]]:
         """
@@ -351,24 +261,86 @@ class UAEntitlement(metaclass=abc.ABCMeta):
                     ),
                 )
 
+        if not self.supports_access_only and self.access_only:
+            return (
+                False,
+                CanEnableFailure(
+                    CanEnableFailureReason.ACCESS_ONLY_NOT_SUPPORTED,
+                    messages.ENABLE_ACCESS_ONLY_NOT_SUPPORTED.format(
+                        title=self.title
+                    ),
+                ),
+            )
+
         return (True, None)
 
-    def _check_any_service_is_active(self, services: Tuple[str, ...]) -> bool:
-        from uaclient.entitlements import (
-            EntitlementNotFoundError,
-            entitlement_factory,
-        )
+    # using Union instead of Optional here to signal that it may expand to
+    # support additional reason types in the future.
+    def enable(
+        self,
+        silent: bool = False,
+    ) -> Tuple[bool, Union[None, CanEnableFailure]]:
+        """Enable specific entitlement.
 
-        for service in services:
-            try:
-                ent_cls = entitlement_factory(cfg=self.cfg, name=service)
-            except EntitlementNotFoundError:
-                continue
-            ent_status, _ = ent_cls(self.cfg).application_status()
-            if ent_status == ApplicationStatus.ENABLED:
-                return True
+        @return: tuple of (success, optional reason)
+            (True, None) on success.
+            (False, reason) otherwise. reason is only non-None if it is a
+                populated CanEnableFailure reason. This may expand to
+                include other types of reasons in the future.
+        """
 
-        return False
+        msg_ops = self.messaging.get("pre_can_enable", [])
+        if not util.handle_message_operations(msg_ops):
+            return False, None
+
+        can_enable, fail = self.can_enable()
+        if not can_enable:
+            if fail is None:
+                # this shouldn't happen, but if it does we shouldn't continue
+                return False, None
+            elif fail.reason == CanEnableFailureReason.INCOMPATIBLE_SERVICE:
+                # Try to disable those services before proceeding with enable
+                incompat_ret, error = self.handle_incompatible_services()
+                if not incompat_ret:
+                    fail.message = error
+                    return False, fail
+            elif (
+                fail.reason
+                == CanEnableFailureReason.INACTIVE_REQUIRED_SERVICES
+            ):
+                # Try to enable those services before proceeding with enable
+                req_ret, error = self._enable_required_services()
+                if not req_ret:
+                    fail.message = error
+                    return False, fail
+            else:
+                # every other reason means we can't continue
+                return False, fail
+
+        msg_ops = self.messaging.get("pre_enable", [])
+        if not util.handle_message_operations(msg_ops):
+            return False, None
+
+        ret = self._perform_enable(silent=silent)
+        if not ret:
+            return False, None
+
+        msg_ops = self.messaging.get("post_enable", [])
+        if not util.handle_message_operations(msg_ops):
+            return False, None
+
+        return True, None
+
+    @abc.abstractmethod
+    def _perform_enable(self, silent: bool = False) -> bool:
+        """
+        Enable specific entitlement. This should be implemented by subclasses.
+        This method does the actual enablement, and does not check can_enable
+        or handle pre_enable or post_enable messaging.
+
+        @return: True on success, False otherwise.
+        """
+        pass
 
     def detect_dependent_services(self) -> bool:
         """
@@ -378,9 +350,14 @@ class UAEntitlement(metaclass=abc.ABCMeta):
             True if there are dependent services enabled
             False if there are no dependent services enabled
         """
-        return self._check_any_service_is_active(
-            services=self.dependent_services
-        )
+        for dependent_service_cls in self.dependent_services:
+            ent_status, _ = dependent_service_cls(
+                self.cfg
+            ).application_status()
+            if ent_status == ApplicationStatus.ENABLED:
+                return True
+
+        return False
 
     def check_required_services_active(self):
         """
@@ -390,18 +367,10 @@ class UAEntitlement(metaclass=abc.ABCMeta):
             True if all required services are active
             False is at least one of the required services is disabled
         """
-        from uaclient.entitlements import entitlement_factory
-
-        for required_service in self.required_services:
-            try:
-                ent_cls = entitlement_factory(
-                    cfg=self.cfg, name=required_service
-                )
-                ent_status, _ = ent_cls(self.cfg).application_status()
-                if ent_status != ApplicationStatus.ENABLED:
-                    return False
-            except exceptions.EntitlementNotFoundError:
-                pass
+        for required_service_cls in self.required_services:
+            ent_status, _ = required_service_cls(self.cfg).application_status()
+            if ent_status != ApplicationStatus.ENABLED:
+                return False
 
         return True
 
@@ -490,20 +459,8 @@ class UAEntitlement(metaclass=abc.ABCMeta):
         that must be enabled first. In that situation, we can ask the user
         if the required service should be enabled before proceeding.
         """
-        from uaclient.entitlements import entitlement_factory
-
-        for required_service in self.required_services:
-            try:
-                ent_cls = entitlement_factory(
-                    cfg=self.cfg, name=required_service
-                )
-            except exceptions.EntitlementNotFoundError:
-                msg = messages.REQUIRED_SERVICE_NOT_FOUND.format(
-                    service=required_service
-                )
-                return False, msg
-
-            ent = ent_cls(self.cfg, allow_beta=True)
+        for required_service_cls in self.required_services:
+            ent = required_service_cls(self.cfg, allow_beta=True)
 
             is_service_disabled = (
                 ent.application_status()[0] == ApplicationStatus.DISABLED
@@ -529,7 +486,7 @@ class UAEntitlement(metaclass=abc.ABCMeta):
                 ret, fail = ent.enable(silent=True)
                 if not ret:
                     error_msg = ""
-                    if fail.message and fail.message.msg:
+                    if fail and fail.message and fail.message.msg:
                         error_msg = "\n" + fail.message.msg
 
                     msg = messages.ERROR_ENABLING_REQUIRED_SERVICE.format(
@@ -539,200 +496,36 @@ class UAEntitlement(metaclass=abc.ABCMeta):
 
         return True, None
 
-    def applicability_status(
-        self,
-    ) -> Tuple[ApplicabilityStatus, Optional[messages.NamedMessage]]:
-        """Check all contract affordances to vet current platform
-
-        Affordances are a list of support constraints for the entitlement.
-        Examples include a list of supported series, architectures for kernel
-        revisions.
+    def can_disable(
+        self, ignore_dependent_services: bool = False
+    ) -> Tuple[bool, Optional[CanDisableFailure]]:
+        """Report whether or not disabling is possible for the entitlement.
 
         :return:
-            tuple of (ApplicabilityStatus, NamedMessage). APPLICABLE if
-            platform passes all defined affordances, INAPPLICABLE if it doesn't
-            meet all of the provided constraints.
+            (True, None) if can disable
+            (False, CanDisableFailure) if can't disable
         """
-        entitlement_cfg = self.cfg.entitlements.get(self.name)
-        if not entitlement_cfg:
+        application_status, _ = self.application_status()
+
+        if application_status == ApplicationStatus.DISABLED:
             return (
-                ApplicabilityStatus.APPLICABLE,
-                messages.NO_ENTITLEMENT_AFFORDANCES_CHECKED,
-            )
-        for error_message, functor, expected_result in self.static_affordances:
-            if functor() != expected_result:
-                return ApplicabilityStatus.INAPPLICABLE, error_message
-        affordances = entitlement_cfg["entitlement"].get("affordances", {})
-        platform = util.get_platform_info()
-        affordance_arches = affordances.get("architectures", None)
-        if (
-            affordance_arches is not None
-            and platform["arch"] not in affordance_arches
-        ):
-            return (
-                ApplicabilityStatus.INAPPLICABLE,
-                messages.INAPPLICABLE_ARCH.format(
-                    title=self.title,
-                    arch=platform["arch"],
-                    supported_arches=", ".join(affordance_arches),
+                False,
+                CanDisableFailure(
+                    CanDisableFailureReason.ALREADY_DISABLED,
+                    message=messages.ALREADY_DISABLED.format(title=self.title),
                 ),
             )
-        affordance_series = affordances.get("series", None)
-        if (
-            affordance_series is not None
-            and platform["series"] not in affordance_series
-        ):
-            return (
-                ApplicabilityStatus.INAPPLICABLE,
-                messages.INAPPLICABLE_SERIES.format(
-                    title=self.title, series=platform["version"]
-                ),
-            )
-        kernel = platform["kernel"]
-        affordance_kernels = affordances.get("kernelFlavors", None)
-        affordance_min_kernel = affordances.get("minKernelVersion")
-        match = re.match(RE_KERNEL_UNAME, kernel)
-        if affordance_kernels is not None:
-            if not match or match.group("flavor") not in affordance_kernels:
+
+        if self.dependent_services and not ignore_dependent_services:
+            if self.detect_dependent_services():
                 return (
-                    ApplicabilityStatus.INAPPLICABLE,
-                    messages.INAPPLICABLE_KERNEL.format(
-                        title=self.title,
-                        kernel=kernel,
-                        supported_kernels=", ".join(affordance_kernels),
+                    False,
+                    CanDisableFailure(
+                        CanDisableFailureReason.ACTIVE_DEPENDENT_SERVICES
                     ),
                 )
-        if affordance_min_kernel:
-            invalid_msg = messages.INAPPLICABLE_KERNEL_VER.format(
-                title=self.title,
-                kernel=kernel,
-                min_kernel=affordance_min_kernel,
-            )
-            try:
-                kernel_major, kernel_minor = affordance_min_kernel.split(".")
-                min_kern_major = int(kernel_major)
-                min_kern_minor = int(kernel_minor)
-            except ValueError:
-                logging.warning(
-                    "Could not parse minKernelVersion: %s",
-                    affordance_min_kernel,
-                )
-                return (ApplicabilityStatus.INAPPLICABLE, invalid_msg)
-
-            if not match:
-                return ApplicabilityStatus.INAPPLICABLE, invalid_msg
-            kernel_major = int(match.group("major"))
-            kernel_minor = int(match.group("minor"))
-            if kernel_major < min_kern_major:
-                return ApplicabilityStatus.INAPPLICABLE, invalid_msg
-            elif (
-                kernel_major == min_kern_major
-                and kernel_minor < min_kern_minor
-            ):
-                return ApplicabilityStatus.INAPPLICABLE, invalid_msg
-        return ApplicabilityStatus.APPLICABLE, None
-
-    @abc.abstractmethod
-    def _perform_disable(self, silent: bool = False) -> bool:
-        """
-        Disable specific entitlement. This should be implemented by subclasses.
-        This method does the actual disable, and does not check can_disable
-        or handle pre_disable or post_disable messaging.
-
-        @param silent: Boolean set True to silence print/log of messages
-
-        @return: True on success, False otherwise.
-        """
-        pass
-
-    def _disable_dependent_services(
-        self, silent: bool
-    ) -> Tuple[bool, Optional[messages.NamedMessage]]:
-        """
-        Disable dependent services
-
-        When performing a disable operation, we might have
-        other services that depend on the original services.
-        If that is true, we will alert the user about this
-        and prompt for confirmation to disable these services
-        as well.
-
-        @param silent: Boolean set True to silence print/log of messages
-        """
-        from uaclient.entitlements import entitlement_factory
-
-        for dependent_service in self.dependent_services:
-            try:
-                ent_cls = entitlement_factory(
-                    cfg=self.cfg, name=dependent_service
-                )
-            except exceptions.EntitlementNotFoundError:
-                msg = messages.DEPENDENT_SERVICE_NOT_FOUND.format(
-                    service=dependent_service
-                )
-                event.info(info_msg=msg.msg, file_type=sys.stderr)
-                return False, msg
-
-            ent = ent_cls(cfg=self.cfg, assume_yes=True)
-
-            is_service_enabled = (
-                ent.application_status()[0] == ApplicationStatus.ENABLED
-            )
-
-            if is_service_enabled:
-                user_msg = messages.DEPENDENT_SERVICE.format(
-                    dependent_service=ent.title,
-                    service_being_disabled=self.title,
-                )
-
-                e_msg = messages.DEPENDENT_SERVICE_STOPS_DISABLE.format(
-                    service_being_disabled=self.title,
-                    dependent_service=ent.title,
-                )
-
-                if not util.prompt_for_confirmation(
-                    msg=user_msg, assume_yes=self.assume_yes
-                ):
-                    return False, e_msg
-
-                if not silent:
-                    event.info(
-                        messages.DISABLING_DEPENDENT_SERVICE.format(
-                            required_service=ent.title
-                        )
-                    )
-
-                ret, fail = ent.disable(silent=True)
-                if not ret:
-                    error_msg = ""
-                    if fail.message and fail.message.msg:
-                        error_msg = "\n" + fail.message.msg
-
-                    msg = messages.FAILED_DISABLING_DEPENDENT_SERVICE.format(
-                        error=error_msg, required_service=ent.title
-                    )
-                    return False, msg
 
         return True, None
-
-    def _check_for_reboot(self) -> bool:
-        """Check if system needs to be rebooted."""
-        return util.should_reboot()
-
-    def _check_for_reboot_msg(
-        self, operation: str, silent: bool = False
-    ) -> None:
-        """Check if user should be alerted that a reboot must be performed.
-
-        @param operation: The operation being executed.
-        @param silent: Boolean set True to silence print/log of messages
-        """
-        if self._check_for_reboot() and not silent:
-            event.info(
-                messages.ENABLE_REBOOT_REQUIRED_TMPL.format(
-                    operation=operation
-                )
-            )
 
     def disable(
         self, silent: bool = False
@@ -780,18 +573,274 @@ class UAEntitlement(metaclass=abc.ABCMeta):
         )
         return True, None
 
+    @abc.abstractmethod
+    def _perform_disable(self, silent: bool = False) -> bool:
+        """
+        Disable specific entitlement. This should be implemented by subclasses.
+        This method does the actual disable, and does not check can_disable
+        or handle pre_disable or post_disable messaging.
+
+        @param silent: Boolean set True to silence print/log of messages
+
+        @return: True on success, False otherwise.
+        """
+        pass
+
+    def _disable_dependent_services(
+        self, silent: bool
+    ) -> Tuple[bool, Optional[messages.NamedMessage]]:
+        """
+        Disable dependent services
+
+        When performing a disable operation, we might have
+        other services that depend on the original services.
+        If that is true, we will alert the user about this
+        and prompt for confirmation to disable these services
+        as well.
+
+        @param silent: Boolean set True to silence print/log of messages
+        """
+        for dependent_service_cls in self.dependent_services:
+            ent = dependent_service_cls(cfg=self.cfg, assume_yes=True)
+
+            is_service_enabled = (
+                ent.application_status()[0] == ApplicationStatus.ENABLED
+            )
+
+            if is_service_enabled:
+                user_msg = messages.DEPENDENT_SERVICE.format(
+                    dependent_service=ent.title,
+                    service_being_disabled=self.title,
+                )
+
+                e_msg = messages.DEPENDENT_SERVICE_STOPS_DISABLE.format(
+                    service_being_disabled=self.title,
+                    dependent_service=ent.title,
+                )
+
+                if not util.prompt_for_confirmation(
+                    msg=user_msg, assume_yes=self.assume_yes
+                ):
+                    return False, e_msg
+
+                if not silent:
+                    event.info(
+                        messages.DISABLING_DEPENDENT_SERVICE.format(
+                            required_service=ent.title
+                        )
+                    )
+
+                ret, fail = ent.disable(silent=True)
+                if not ret:
+                    error_msg = ""
+                    if fail and fail.message and fail.message.msg:
+                        error_msg = "\n" + fail.message.msg
+
+                    msg = messages.FAILED_DISABLING_DEPENDENT_SERVICE.format(
+                        error=error_msg, required_service=ent.title
+                    )
+                    return False, msg
+
+        return True, None
+
+    def _check_for_reboot(self) -> bool:
+        """Check if system needs to be rebooted."""
+        return system.should_reboot()
+
+    def _check_for_reboot_msg(
+        self, operation: str, silent: bool = False
+    ) -> None:
+        """Check if user should be alerted that a reboot must be performed.
+
+        @param operation: The operation being executed.
+        @param silent: Boolean set True to silence print/log of messages
+        """
+        if self._check_for_reboot() and not silent:
+            event.info(
+                messages.ENABLE_REBOOT_REQUIRED_TMPL.format(
+                    operation=operation
+                )
+            )
+
+    def applicability_status(
+        self,
+    ) -> Tuple[ApplicabilityStatus, Optional[messages.NamedMessage]]:
+        """Check all contract affordances to vet current platform
+
+        Affordances are a list of support constraints for the entitlement.
+        Examples include a list of supported series, architectures for kernel
+        revisions.
+
+        :return:
+            tuple of (ApplicabilityStatus, NamedMessage). APPLICABLE if
+            platform passes all defined affordances, INAPPLICABLE if it doesn't
+            meet all of the provided constraints.
+        """
+        entitlement_cfg = self.cfg.machine_token_file.entitlements.get(
+            self.name
+        )
+        if not entitlement_cfg:
+            return (
+                ApplicabilityStatus.APPLICABLE,
+                messages.NO_ENTITLEMENT_AFFORDANCES_CHECKED,
+            )
+        for error_message, functor, expected_result in self.static_affordances:
+            if functor() != expected_result:
+                return ApplicabilityStatus.INAPPLICABLE, error_message
+        affordances = entitlement_cfg["entitlement"].get("affordances", {})
+        platform = system.get_platform_info()
+        affordance_arches = affordances.get("architectures", None)
+        if (
+            self.affordance_check_arch
+            and affordance_arches is not None
+            and platform["arch"] not in affordance_arches
+        ):
+            deduplicated_arches = util.deduplicate_arches(affordance_arches)
+            return (
+                ApplicabilityStatus.INAPPLICABLE,
+                messages.INAPPLICABLE_ARCH.format(
+                    title=self.title,
+                    arch=platform["arch"],
+                    supported_arches=", ".join(deduplicated_arches),
+                ),
+            )
+        affordance_series = affordances.get("series", None)
+        if (
+            self.affordance_check_series
+            and affordance_series is not None
+            and platform["series"] not in affordance_series
+        ):
+            return (
+                ApplicabilityStatus.INAPPLICABLE,
+                messages.INAPPLICABLE_SERIES.format(
+                    title=self.title, series=platform["version"]
+                ),
+            )
+        kernel_info = system.get_kernel_info()
+        affordance_kernels = affordances.get("kernelFlavors", None)
+        affordance_min_kernel = affordances.get("minKernelVersion", None)
+        if (
+            self.affordance_check_kernel_flavor
+            and affordance_kernels is not None
+        ):
+            if kernel_info.flavor not in affordance_kernels:
+                return (
+                    ApplicabilityStatus.INAPPLICABLE,
+                    messages.INAPPLICABLE_KERNEL.format(
+                        title=self.title,
+                        kernel=kernel_info.uname_release,
+                        supported_kernels=", ".join(affordance_kernels),
+                    ),
+                )
+        if (
+            self.affordance_check_kernel_min_version
+            and affordance_min_kernel
+            and kernel_info.major is not None
+            and kernel_info.minor is not None
+        ):
+            invalid_msg = messages.INAPPLICABLE_KERNEL_VER.format(
+                title=self.title,
+                kernel=kernel_info.uname_release,
+                min_kernel=affordance_min_kernel,
+            )
+            try:
+                kernel_major, kernel_minor = affordance_min_kernel.split(".")
+                min_kern_major = int(kernel_major)
+                min_kern_minor = int(kernel_minor)
+            except ValueError:
+                logging.warning(
+                    "Could not parse minKernelVersion: %s",
+                    affordance_min_kernel,
+                )
+                return (ApplicabilityStatus.INAPPLICABLE, invalid_msg)
+
+            if kernel_info.major < min_kern_major:
+                return ApplicabilityStatus.INAPPLICABLE, invalid_msg
+            elif (
+                kernel_info.major == min_kern_major
+                and kernel_info.minor < min_kern_minor
+            ):
+                return ApplicabilityStatus.INAPPLICABLE, invalid_msg
+        return ApplicabilityStatus.APPLICABLE, None
+
     def contract_status(self) -> ContractStatus:
         """Return whether the user is entitled to the entitlement or not"""
         if not self.cfg.is_attached:
             return ContractStatus.UNENTITLED
-        entitlement_cfg = self.cfg.entitlements.get(self.name, {})
+        entitlement_cfg = self.cfg.machine_token_file.entitlements.get(
+            self.name, {}
+        )
         if entitlement_cfg and entitlement_cfg["entitlement"].get("entitled"):
             return ContractStatus.ENTITLED
         return ContractStatus.UNENTITLED
 
+    def user_facing_status(
+        self,
+    ) -> Tuple[UserFacingStatus, Optional[messages.NamedMessage]]:
+        """Return (user-facing status, details) for entitlement"""
+        applicability, details = self.applicability_status()
+        if applicability != ApplicabilityStatus.APPLICABLE:
+            return UserFacingStatus.INAPPLICABLE, details
+        entitlement_cfg = self.cfg.machine_token_file.entitlements.get(
+            self.name
+        )
+        if not entitlement_cfg:
+            return (
+                UserFacingStatus.UNAVAILABLE,
+                messages.SERVICE_NOT_ENTITLED.format(title=self.title),
+            )
+        elif entitlement_cfg["entitlement"].get("entitled", False) is False:
+            return (
+                UserFacingStatus.UNAVAILABLE,
+                messages.SERVICE_NOT_ENTITLED.format(title=self.title),
+            )
+
+        application_status, explanation = self.application_status()
+
+        if application_status == ApplicationStatus.DISABLED:
+            return UserFacingStatus.INACTIVE, explanation
+
+        warning, warn_msg = self.enabled_warning_status()
+
+        if warning:
+            return UserFacingStatus.WARNING, warn_msg
+
+        return UserFacingStatus.ACTIVE, explanation
+
+    @abc.abstractmethod
+    def application_status(
+        self,
+    ) -> Tuple[ApplicationStatus, Optional[messages.NamedMessage]]:
+        """
+        The current status of application of this entitlement
+
+        :return:
+            A tuple of (ApplicationStatus, human-friendly reason)
+        """
+        pass
+
+    def enabled_warning_status(
+        self,
+    ) -> Tuple[bool, Optional[messages.NamedMessage]]:
+        """
+        If the entitlment is enabled, are there any warnings?
+        The message is displayed as a Warning Notice in status output
+
+        :return:
+            A tuple of (warning bool, human-friendly reason)
+        """
+        return False, None
+
+    def status_description_override(
+        self,
+    ) -> Optional[str]:
+        return None
+
     def is_access_expired(self) -> bool:
         """Return entitlement access info as stale and needing refresh."""
-        entitlement_contract = self.cfg.entitlements.get(self.name, {})
+        entitlement_contract = self.cfg.machine_token_file.entitlements.get(
+            self.name, {}
+        )
         # TODO(No expiry per resource in MVP yet)
         expire_str = entitlement_contract.get("expires")
         if not expire_str:
@@ -850,7 +899,7 @@ class UAEntitlement(metaclass=abc.ABCMeta):
         transition_to_unentitled = bool(delta_entitlement == util.DROPPED_KEY)
         if not transition_to_unentitled:
             if delta_entitlement:
-                util.apply_contract_overrides(deltas)
+                contract.apply_contract_overrides(deltas)
                 delta_entitlement = deltas["entitlement"]
             if orig_access and "entitled" in delta_entitlement:
                 transition_to_unentitled = delta_entitlement["entitled"] in (
@@ -874,7 +923,7 @@ class UAEntitlement(metaclass=abc.ABCMeta):
                     logging.warning(
                         "Unable to disable '%s' as recommended during contract"
                         " refresh. Service is still active. See"
-                        " `ua status`",
+                        " `pro status`",
                         self.name,
                     )
             # Clean up former entitled machine-access-<name> response cache
@@ -909,41 +958,3 @@ class UAEntitlement(metaclass=abc.ABCMeta):
             return True
 
         return False
-
-    def user_facing_status(
-        self,
-    ) -> Tuple[UserFacingStatus, Optional[messages.NamedMessage]]:
-        """Return (user-facing status, details) for entitlement"""
-        applicability, details = self.applicability_status()
-        if applicability != ApplicabilityStatus.APPLICABLE:
-            return UserFacingStatus.INAPPLICABLE, details
-        entitlement_cfg = self.cfg.entitlements.get(self.name)
-        if not entitlement_cfg:
-            return (
-                UserFacingStatus.UNAVAILABLE,
-                messages.SERVICE_NOT_ENTITLED.format(title=self.title),
-            )
-        elif entitlement_cfg["entitlement"].get("entitled", False) is False:
-            return (
-                UserFacingStatus.UNAVAILABLE,
-                messages.SERVICE_NOT_ENTITLED.format(title=self.title),
-            )
-
-        application_status, explanation = self.application_status()
-        user_facing_status = {
-            ApplicationStatus.ENABLED: UserFacingStatus.ACTIVE,
-            ApplicationStatus.DISABLED: UserFacingStatus.INACTIVE,
-        }[application_status]
-        return user_facing_status, explanation
-
-    @abc.abstractmethod
-    def application_status(
-        self,
-    ) -> Tuple[ApplicationStatus, Optional[messages.NamedMessage]]:
-        """
-        The current status of application of this entitlement
-
-        :return:
-            A tuple of (ApplicationStatus, human-friendly reason)
-        """
-        pass

@@ -63,6 +63,9 @@
         },
         "num_standard_security_updates": {
           "type": "integer"
+        },
+        "reboot_required": {
+          "type": "string"
         }
       }
     },
@@ -83,6 +86,9 @@
           "origin": {
             "type": "string"
           },
+          "download_size": {
+            "type": "integer"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -91,6 +97,25 @@
               "pending_enable",
               "upgrade_unavailable"
             ]
+          }
+        }
+      }
+    },
+    "livepatch": {
+      "type": "object",
+      "properties": {
+        "fixed_cves": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "patched": {
+                "type": "boolean"
+              }
+            }
           }
         }
       }

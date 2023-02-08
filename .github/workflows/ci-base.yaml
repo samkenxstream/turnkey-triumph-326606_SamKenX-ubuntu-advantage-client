@@ -20,11 +20,13 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get -qy update
           sudo DEBIAN_FRONTEND=noninteractive apt-get -qy install tox
       - name: Git checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: Formatting
         run: tox -e black -e isort
       - name: Mypy
         run: tox -e mypy
+      - name: Version Consistency
+        run: python3 ./tools/check-versions-are-consistent.py
   unit-tests:
     name: Matrix
     strategy:
@@ -44,9 +46,9 @@ jobs:
         if: matrix.testenv.deadsnake != ''
         run: |
           sudo add-apt-repository --yes ppa:deadsnakes/ppa
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -qy install "${{ matrix.testenv.deadsnake }}"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -qy install "${{ matrix.testenv.deadsnake }}" "${{ matrix.testenv.deadsnake }}-dev"
       - name: Git checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: Flake8
         run: tox -e "${{ matrix.testenv.pyver }}-flake8"
       - name: Unit

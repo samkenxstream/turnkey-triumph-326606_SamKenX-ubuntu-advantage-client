@@ -1,11 +1,12 @@
 import copy
 import json
+import logging
 import socket
 
 import mock
 import pytest
 
-from uaclient import exceptions, util
+from uaclient import exceptions, messages, util
 from uaclient.contract import (
     API_V1_CONTEXT_MACHINE_TOKEN,
     API_V1_CONTRACT_INFORMATION,
@@ -13,6 +14,8 @@ from uaclient.contract import (
     API_V1_TMPL_CONTEXT_MACHINE_TOKEN_RESOURCE,
     API_V1_TMPL_RESOURCE_MACHINE_ACCESS,
     UAContractClient,
+    _get_override_weight,
+    apply_contract_overrides,
     get_available_resources,
     get_contract_information,
     is_contract_changed,
@@ -28,6 +31,7 @@ from uaclient.messages import (
     ATTACH_FORBIDDEN_NEVER,
     ATTACH_FORBIDDEN_NOT_YET,
     ATTACH_INVALID_TOKEN,
+    INVALID_PRO_IMAGE,
     UNEXPECTED_ERROR,
 )
 from uaclient.status import UserFacingStatus
@@ -39,24 +43,18 @@ M_REPO_PATH = "uaclient.entitlements.repo.RepoEntitlement."
 
 
 @mock.patch("uaclient.serviceclient.UAServiceClient.request_url")
-@mock.patch("uaclient.contract.util.get_machine_id")
+@mock.patch("uaclient.contract.system.get_machine_id")
 class TestUAContractClient:
     @pytest.mark.parametrize(
         "machine_id_response", (("contract-machine-id"), None)
     )
-    @pytest.mark.parametrize(
-        "detach,expected_http_method",
-        ((None, "POST"), (False, "POST"), (True, "DELETE")),
-    )
     @pytest.mark.parametrize("activity_id", ((None), ("test-acid")))
-    @mock.patch("uaclient.contract.util.get_platform_info")
+    @mock.patch("uaclient.contract.system.get_platform_info")
     def test__request_machine_token_update(
         self,
         get_platform_info,
         get_machine_id,
         request_url,
-        detach,
-        expected_http_method,
         machine_id_response,
         activity_id,
         FakeConfig,
@@ -78,8 +76,6 @@ class TestUAContractClient:
         cfg = FakeConfig.for_attached_machine()
         client = UAContractClient(cfg)
         kwargs = {"machine_token": "mToken", "contract_id": "cId"}
-        if detach is not None:
-            kwargs["detach"] = detach
         enabled_services = ["esm-apps", "livepatch"]
 
         def entitlement_user_facing_status(self):
@@ -87,7 +83,9 @@ class TestUAContractClient:
                 return (UserFacingStatus.ACTIVE, "")
             return (UserFacingStatus.INACTIVE, "")
 
-        with mock.patch.object(type(cfg), "activity_id", activity_id):
+        with mock.patch.object(
+            type(cfg.machine_token_file), "activity_id", activity_id
+        ):
             with mock.patch.object(
                 UAEntitlement,
                 "user_facing_status",
@@ -95,13 +93,14 @@ class TestUAContractClient:
             ):
                 client._request_machine_token_update(**kwargs)
 
-        if not detach:  # Then we have written the updated cache
-            assert machine_token == cfg.read_cache("machine-token")
-            expected_machine_id = "machineId"
-            if machine_id_response:
-                expected_machine_id = machine_id_response
+        assert machine_token != cfg.machine_token_file.machine_token
+        client.update_files_after_machine_token_update(machine_token)
+        assert machine_token == cfg.machine_token_file.machine_token
+        expected_machine_id = "machineId"
+        if machine_id_response:
+            expected_machine_id = machine_id_response
 
-            assert expected_machine_id == cfg.read_cache("machine-id")
+        assert expected_machine_id == cfg.read_cache("machine-id")
         params = {
             "headers": {
                 "user-agent": "UA-Client/{}".format(get_version()),
@@ -109,20 +108,19 @@ class TestUAContractClient:
                 "content-type": "application/json",
                 "Authorization": "Bearer mToken",
             },
-            "method": expected_http_method,
+            "method": "POST",
         }
-        if expected_http_method != "DELETE":
-            expected_activity_id = activity_id if activity_id else "machineId"
-            params["data"] = {
-                "machineId": "machineId",
-                "architecture": "arch",
-                "os": {"kernel": "kernel"},
-                "activityInfo": {
-                    "activityToken": None,
-                    "activityID": expected_activity_id,
-                    "resources": enabled_services,
-                },
-            }
+        expected_activity_id = activity_id if activity_id else "machineId"
+        params["data"] = {
+            "machineId": "machineId",
+            "architecture": "arch",
+            "os": {"kernel": "kernel"},
+            "activityInfo": {
+                "activityToken": None,
+                "activityID": expected_activity_id,
+                "resources": enabled_services,
+            },
+        }
         assert request_url.call_args_list == [
             mock.call("/v1/contracts/cId/context/machines/machineId", **params)
         ]
@@ -136,7 +134,7 @@ class TestUAContractClient:
         ((None, "POST"), (False, "POST"), (True, "DELETE")),
     )
     @pytest.mark.parametrize("activity_id", ((None), ("test-acid")))
-    @mock.patch("uaclient.contract.util.get_platform_info")
+    @mock.patch("uaclient.contract.system.get_platform_info")
     @mock.patch.object(UAContractClient, "_get_platform_data")
     def test_get_updated_contract_info(
         self,
@@ -156,7 +154,12 @@ class TestUAContractClient:
             return {"machineId": machine_id}
 
         m_platform_data.side_effect = fake_platform_data
-        get_platform_info.return_value = {"arch": "arch", "kernel": "kernel"}
+        get_platform_info.return_value = {
+            "arch": "arch",
+            "kernel": "kernel",
+            "series": "series",
+        }
+
         get_machine_id.return_value = "machineId"
         machine_token = {"machineTokenInfo": {}}
         if machine_id_response:
@@ -222,8 +225,10 @@ class TestUAContractClient:
     @pytest.mark.parametrize(
         "enabled_services", (([]), (["esm-apps", "livepatch"]))
     )
+    @mock.patch("os.getuid", return_value=0)
     def test_report_machine_activity(
         self,
+        _m_getuid,
         get_machine_id,
         request_url,
         activity_id,
@@ -249,19 +254,21 @@ class TestUAContractClient:
                 return (UserFacingStatus.ACTIVE, "")
             return (UserFacingStatus.INACTIVE, "")
 
-        with mock.patch.object(type(cfg), "activity_id", activity_id):
+        with mock.patch.object(
+            type(cfg.machine_token_file), "activity_id", activity_id
+        ):
             with mock.patch.object(
                 UAEntitlement,
                 "user_facing_status",
                 new=entitlement_user_facing_status,
             ):
                 with mock.patch(
-                    "uaclient.config.UAConfig.write_cache"
-                ) as m_write_cache:
+                    "uaclient.config.files.MachineTokenFile.write"
+                ) as m_write_file:
                     client.report_machine_activity()
 
         expected_write_calls = 1
-        assert expected_write_calls == m_write_cache.call_count
+        assert expected_write_calls == m_write_file.call_count
 
         expected_activity_id = activity_id if activity_id else machine_id
         params = {
@@ -339,6 +346,150 @@ class TestUAContractClient:
 
         assert expected_machine_id == cfg.read_cache("machine-id")
 
+    def test_new_magic_attach_token_successfull(
+        self,
+        get_machine_id,
+        request_url,
+        FakeConfig,
+    ):
+        cfg = FakeConfig()
+        client = UAContractClient(cfg)
+        magic_attach_token_resp = (
+            {
+                "token": "token",
+                "expires": "2100-06-09T18:14:55.323733Z",
+                "expiresIn": 600,
+                "userCode": "1234",
+            },
+        )
+        request_url.return_value = (magic_attach_token_resp, None)
+
+        assert client.new_magic_attach_token() == magic_attach_token_resp
+
+    @pytest.mark.parametrize(
+        "raised_exception,expected_exception,message",
+        (
+            (
+                exceptions.UrlError("test"),
+                exceptions.ConnectivityError,
+                messages.CONNECTIVITY_ERROR,
+            ),
+            (
+                exceptions.ContractAPIError(
+                    exceptions.UrlError("test", code=503),
+                    error_response={},
+                ),
+                exceptions.MagicAttachUnavailable,
+                messages.MAGIC_ATTACH_UNAVAILABLE,
+            ),
+        ),
+    )
+    def test_new_magic_attach_token_fails(
+        self,
+        get_machine_id,
+        request_url,
+        FakeConfig,
+        raised_exception,
+        expected_exception,
+        message,
+    ):
+        cfg = FakeConfig()
+        client = UAContractClient(cfg)
+        request_url.side_effect = raised_exception
+
+        with pytest.raises(expected_exception) as exc_error:
+            client.new_magic_attach_token()
+
+        assert message.msg == exc_error.value.msg
+        assert message.name == exc_error.value.msg_code
+
+    @pytest.mark.parametrize(
+        "error_code,expected_exception",
+        (
+            (401, exceptions.MagicAttachTokenError),
+            (503, exceptions.MagicAttachUnavailable),
+        ),
+    )
+    def test_get_magic_attach_token_info_contract_error(
+        self,
+        get_machine_id,
+        request_url,
+        error_code,
+        expected_exception,
+        FakeConfig,
+    ):
+        cfg = FakeConfig()
+        client = UAContractClient(cfg)
+        magic_token = "test-id"
+        request_url.side_effect = exceptions.ContractAPIError(
+            exceptions.UrlError("test", error_code),
+            error_response={},
+        )
+
+        with pytest.raises(expected_exception):
+            client.get_magic_attach_token_info(magic_token=magic_token)
+
+    def test_request_magic_attach_id_info_fails(
+        self,
+        get_machine_id,
+        request_url,
+        FakeConfig,
+    ):
+        cfg = FakeConfig()
+        client = UAContractClient(cfg)
+        magic_token = "test-id"
+        request_url.side_effect = exceptions.UrlError("test")
+
+        with pytest.raises(exceptions.ConnectivityError) as exc_error:
+            client.get_magic_attach_token_info(magic_token=magic_token)
+
+        assert messages.CONNECTIVITY_ERROR.msg == exc_error.value.msg
+        assert messages.CONNECTIVITY_ERROR.name == exc_error.value.msg_code
+
+    @pytest.mark.parametrize(
+        "error_code,expected_exception",
+        (
+            (400, exceptions.MagicAttachTokenAlreadyActivated),
+            (401, exceptions.MagicAttachTokenError),
+            (503, exceptions.MagicAttachUnavailable),
+        ),
+    )
+    def test_revoke_magic_attach_token_contract_error(
+        self,
+        get_machine_id,
+        request_url,
+        error_code,
+        expected_exception,
+        FakeConfig,
+    ):
+        cfg = FakeConfig()
+        client = UAContractClient(cfg)
+        magic_token = "test-id"
+        request_url.side_effect = exceptions.ContractAPIError(
+            exceptions.UrlError("test", error_code),
+            error_response={},
+        )
+
+        with pytest.raises(expected_exception):
+            client.revoke_magic_attach_token(magic_token=magic_token)
+
+    def test_revoke_magic_attach_token_fails(
+        self,
+        get_machine_id,
+        request_url,
+        FakeConfig,
+    ):
+        cfg = FakeConfig()
+        client = UAContractClient(cfg)
+        magic_token = "test-id"
+        request_url.side_effect = exceptions.UrlError("test")
+
+        with pytest.raises(exceptions.ConnectivityError) as exc_error:
+            client.revoke_magic_attach_token(magic_token=magic_token)
+
+        assert messages.CONNECTIVITY_ERROR.msg == exc_error.value.msg
+        assert messages.CONNECTIVITY_ERROR.name == exc_error.value.msg_code
+
 
 class TestProcessEntitlementDeltas:
     def test_error_on_missing_entitlement_type(self, FakeConfig):
@@ -398,7 +549,7 @@ class TestProcessEntitlementDeltas:
         assert expected_calls == m_process_contract_deltas.call_args_list
 
     @mock.patch(
-        "uaclient.util.get_platform_info",
+        "uaclient.system.get_platform_info",
         return_value={"series": "fake_series"},
     )
     @mock.patch(M_REPO_PATH + "process_contract_deltas")
@@ -568,7 +719,7 @@ class TestRequestUpdatedContract:
             ),
         ),
     )
-    @mock.patch("uaclient.util.get_machine_id", return_value="mid")
+    @mock.patch("uaclient.system.get_machine_id", return_value="mid")
     @mock.patch(M_PATH + "UAContractClient")
     def test_invalid_token_user_facing_error_on_invalid_token_refresh_failure(
         self,
@@ -605,7 +756,7 @@ class TestRequestUpdatedContract:
 
         assert error_msg.msg == str(exc.value.msg)
 
-    @mock.patch("uaclient.util.get_machine_id", return_value="mid")
+    @mock.patch("uaclient.system.get_machine_id", return_value="mid")
     @mock.patch(M_PATH + "UAContractClient")
     def test_user_facing_error_on_machine_token_refresh_failure(
         self, client, get_machine_id, FakeConfig
@@ -628,10 +779,11 @@ class TestRequestUpdatedContract:
 
         assert "Machine token refresh fail" == str(exc.value)
 
-    @mock.patch("uaclient.util.get_machine_id", return_value="mid")
+    @mock.patch("uaclient.entitlements.entitlements_enable_order")
+    @mock.patch("uaclient.system.get_machine_id", return_value="mid")
     @mock.patch(M_PATH + "UAContractClient")
     def test_user_facing_error_on_service_token_refresh_failure(
-        self, client, get_machine_id, FakeConfig
+        self, client, get_machine_id, m_enable_order, FakeConfig
     ):
         """When attaching, error on any failed specific service refresh."""
 
@@ -647,6 +799,7 @@ class TestRequestUpdatedContract:
                 }
             },
         }
+        m_enable_order.return_value = ["ent2", "ent1"]
 
         def fake_contract_client(cfg):
             fake_client = FakeContractClient(cfg)
@@ -654,7 +807,9 @@ class TestRequestUpdatedContract:
             return fake_client
 
         client.side_effect = fake_contract_client
-        cfg = FakeConfig.for_attached_machine(machine_token=machine_token)
+        cfg = FakeConfig.for_attached_machine(
+            machine_token=machine_token,
+        )
         with mock.patch(M_PATH + "process_entitlement_delta") as m_process:
             m_process.side_effect = (
                 exceptions.UserFacingError("broken ent1"),
@@ -670,7 +825,7 @@ class TestRequestUpdatedContract:
         (
             (
                 exceptions.UserFacingError(
-                    "Ubuntu Advantage server provided no aptKey directive for"
+                    "Ubuntu Pro server provided no aptKey directive for"
                     " esm-infra"
                 ),
                 (None, False),
@@ -681,7 +836,7 @@ class TestRequestUpdatedContract:
             # is raised as primary error_msg
             (
                 exceptions.UserFacingError(
-                    "Ubuntu Advantage server provided no aptKey directive for"
+                    "Ubuntu Pro server provided no aptKey directive for"
                     " esm-infra"
                 ),
                 RuntimeError("some APT error"),  # High-priority ordered 2
@@ -689,14 +844,16 @@ class TestRequestUpdatedContract:
             ),
         ),
     )
+    @mock.patch("uaclient.entitlements.entitlements_enable_order")
     @mock.patch(M_PATH + "process_entitlement_delta")
-    @mock.patch("uaclient.util.get_machine_id", return_value="mid")
+    @mock.patch("uaclient.system.get_machine_id", return_value="mid")
     @mock.patch(M_PATH + "UAContractClient")
     def test_user_facing_error_due_to_unexpected_process_entitlement_delta(
         self,
         client,
         get_machine_id,
         process_entitlement_delta,
+        m_enable_order,
         first_error,
         second_error,
         ux_error_msg,
@@ -731,8 +888,11 @@ class TestRequestUpdatedContract:
                 }
             },
         }
+        m_enable_order.return_value = ["ent3", "ent2", "ent1"]
 
-        cfg = FakeConfig.for_attached_machine(machine_token=machine_token)
+        cfg = FakeConfig.for_attached_machine(
+            machine_token=machine_token,
+        )
         fake_client = FakeContractClient(cfg)
         fake_client._responses = {
             self.refresh_route: machine_token,
@@ -751,20 +911,26 @@ class TestRequestUpdatedContract:
         assert 3 == process_entitlement_delta.call_count
         assert ux_error_msg.msg == str(exc.value.msg)
 
+    @mock.patch("uaclient.entitlements.entitlements_enable_order")
     @mock.patch(M_PATH + "process_entitlement_delta")
-    @mock.patch("uaclient.util.get_machine_id", return_value="mid")
+    @mock.patch("uaclient.system.get_machine_id", return_value="mid")
     @mock.patch(M_PATH + "UAContractClient")
     def test_attached_config_refresh_machine_token_and_services(
-        self, client, get_machine_id, process_entitlement_delta, FakeConfig
+        self,
+        client,
+        get_machine_id,
+        process_entitlement_delta,
+        m_enable_order,
+        FakeConfig,
     ):
         """When attached, refresh machine token and entitled services.
 
         Processing service deltas are processed in a sorted order based on
-        name to ensure operations occur the same regardless of dict ordering.
+        service dependencies to ensure operations occur the same regardless
+        of dict ordering.
         """
+        m_enable_order.return_value = ["ent2", "ent1"]
 
-        # resourceEntitlements specifically ordered reverse alphabetically
-        # to ensure proper sorting for process_contract_delta calls below
         machine_token = {
             "machineToken": "mToken",
             "machineTokenInfo": {
@@ -788,15 +954,25 @@ class TestRequestUpdatedContract:
             return client
 
         client.side_effect = fake_contract_client
-        cfg = FakeConfig.for_attached_machine(machine_token=machine_token)
+        cfg = FakeConfig.for_attached_machine(
+            machine_token=machine_token,
+        )
         process_entitlement_delta.return_value = (None, False)
         assert None is request_updated_contract(cfg)
-        assert new_token == cfg.read_cache("machine-token")
+        assert new_token == cfg.machine_token_file.machine_token
 
-        # Deltas are processed in a sorted fashion so that if enableByDefault
-        # is true, the order of enablement operations is the same regardless
-        # of dict key ordering.
         process_calls = [
+            mock.call(
+                cfg=cfg,
+                orig_access={
+                    "entitlement": {"entitled": False, "type": "ent2"}
+                },
+                new_access={
+                    "entitlement": {"entitled": False, "type": "ent2"}
+                },
+                allow_enable=False,
+                series_overrides=True,
+            ),
             mock.call(
                 cfg=cfg,
                 orig_access={
@@ -812,17 +988,6 @@ class TestRequestUpdatedContract:
                 allow_enable=False,
                 series_overrides=True,
             ),
-            mock.call(
-                cfg=cfg,
-                orig_access={
-                    "entitlement": {"entitled": False, "type": "ent2"}
-                },
-                new_access={
-                    "entitlement": {"entitled": False, "type": "ent2"}
-                },
-                allow_enable=False,
-                series_overrides=True,
-            ),
         ]
         assert process_calls == process_entitlement_delta.call_args_list
 
@@ -834,10 +999,10 @@ class TestContractChanged:
         self, get_updated_contract_info, has_contract_expired, FakeConfig
     ):
         if has_contract_expired:
-            expiry_date = "2041-05-08T19:02:26Z"
+            expiry_date = util.parse_rfc3339_date("2041-05-08T19:02:26Z")
             ret_val = True
         else:
-            expiry_date = "2040-05-08T19:02:26Z"
+            expiry_date = util.parse_rfc3339_date("2040-05-08T19:02:26Z")
             ret_val = False
         get_updated_contract_info.return_value = {
             "machineTokenInfo": {
@@ -864,10 +1029,287 @@ class TestContractChanged:
                 "machineId": "test_machine_id",
                 "resourceTokens": resourceTokens,
                 "contractInfo": {
-                    "effectiveTo": "2040-05-08T19:02:26Z",
+                    "effectiveTo": util.parse_rfc3339_date(
+                        "2040-05-08T19:02:26Z"
+                    ),
                     "resourceEntitlements": resourceEntitlements,
                 },
             },
         }
         cfg = FakeConfig().for_attached_machine()
         assert is_contract_changed(cfg) == has_contract_changed
+
+
+class TestApplyContractOverrides:
+    @pytest.mark.parametrize(
+        "override_selector,expected_weight",
+        (
+            ({"selector1": "valueX", "selector2": "valueZ"}, 0),
+            ({"selector1": "valueA", "selector2": "valueZ"}, 0),
+            ({"selector1": "valueX", "selector2": "valueB"}, 0),
+            ({"selector1": "valueA"}, 1),
+            ({"selector2": "valueB"}, 2),
+            ({"selector1": "valueA", "selector2": "valueB"}, 3),
+        ),
+    )
+    def test_get_override_weight(self, override_selector, expected_weight):
+        selector_values = {"selector1": "valueA", "selector2": "valueB"}
+        selector_weights = {"selector1": 1, "selector2": 2}
+        with mock.patch(
+            "uaclient.contract.OVERRIDE_SELECTOR_WEIGHTS", selector_weights
+        ):
+            assert expected_weight == _get_override_weight(
+                override_selector, selector_values
+            )
+
+    def test_error_on_non_entitlement_dict(self):
+        """Raise a runtime error when seeing invalid dict type."""
+        with pytest.raises(RuntimeError) as exc:
+            apply_contract_overrides({"some": "dict"})
+        error = (
+            'Expected entitlement access dict. Missing "entitlement" key:'
+            " {'some': 'dict'}"
+        )
+        assert error == str(exc.value)
+
+    @pytest.mark.parametrize("include_overrides", (True, False))
+    @mock.patch(
+        "uaclient.system.get_platform_info", return_value={"series": "ubuntuX"}
+    )
+    @mock.patch(
+        "uaclient.clouds.identity.get_cloud_type", return_value=(None, "")
+    )
+    def test_return_same_dict_when_no_overrides_match(
+        self, _m_cloud_type, _m_platform_info, include_overrides
+    ):
+        orig_access = {
+            "entitlement": {
+                "affordances": {"some_affordance": ["ubuntuX"]},
+                "directives": {"some_directive": ["ubuntuX"]},
+                "obligations": {"some_obligation": False},
+            }
+        }
+        # exactly the same
+        expected = {
+            "entitlement": {
+                "affordances": {"some_affordance": ["ubuntuX"]},
+                "directives": {"some_directive": ["ubuntuX"]},
+                "obligations": {"some_obligation": False},
+            }
+        }
+        if include_overrides:
+            orig_access["entitlement"].update(
+                {
+                    "series": {
+                        "dontMatch": {
+                            "affordances": {
+                                "some_affordance": ["ubuntuX-series-overriden"]
+                            }
+                        }
+                    },
+                    "overrides": [
+                        {
+                            "selector": {"series": "dontMatch"},
+                            "affordances": {
+                                "some_affordance": ["ubuntuX-series-overriden"]
+                            },
+                        },
+                        {
+                            "selector": {"cloud": "dontMatch"},
+                            "affordances": {
+                                "some_affordance": ["ubuntuX-cloud-overriden"]
+                            },
+                        },
+                    ],
+                }
+            )
+
+        apply_contract_overrides(orig_access)
+        assert expected == orig_access
+
+    @mock.patch(
+        "uaclient.system.get_platform_info", return_value={"series": "ubuntuX"}
+    )
+    def test_missing_keys_are_included(self, _m_platform_info):
+        orig_access = {
+            "entitlement": {
+                "series": {"ubuntuX": {"directives": {"suites": ["ubuntuX"]}}}
+            }
+        }
+        expected = {"entitlement": {"directives": {"suites": ["ubuntuX"]}}}
+
+        apply_contract_overrides(orig_access)
+
+        assert expected == orig_access
+
+    @pytest.mark.parametrize(
+        "series_selector,cloud_selector,series_cloud_selector,expected_value",
+        (
+            # apply_overrides_when_only_series_match
+            ("no-match", "no-match", "no-match", "old_series_overriden"),
+            # series selector is applied over old series override
+            ("ubuntuX", "no-match", "no-match", "series_overriden"),
+            # cloud selector is applied over series override
+            ("no-match", "cloudX", "no-match", "cloud_overriden"),
+            # cloud selector is applied over series selector
+            ("ubuntuX", "cloudX", "no-match", "cloud_overriden"),
+            # cloud and series together are applied over others
+            ("ubuntuX", "cloudX", "cloudX", "both_overriden"),
+        ),
+    )
+    @mock.patch(
+        "uaclient.system.get_platform_info", return_value={"series": "ubuntuX"}
+    )
+    @mock.patch(
+        "uaclient.clouds.identity.get_cloud_type",
+        return_value=("cloudX", None),
+    )
+    def test_applies_contract_overrides_respecting_weight(
+        self,
+        _m_cloud_type,
+        _m_platform_info,
+        series_selector,
+        cloud_selector,
+        series_cloud_selector,
+        expected_value,
+    ):
+        """Apply the expected overrides to orig_access dict when called."""
+        orig_access = {
+            "entitlement": {
+                "affordances": {"some_affordance": ["original_affordance"]},
+                "series": {
+                    "ubuntuX": {
+                        "affordances": {
+                            "some_affordance": ["old_series_overriden"]
+                        }
+                    }
+                },
+                "overrides": [
+                    {
+                        "selector": {"series": series_selector},
+                        "affordances": {
+                            "some_affordance": ["series_overriden"]
+                        },
+                    },
+                    {
+                        "selector": {"cloud": cloud_selector},
+                        "affordances": {
+                            "some_affordance": ["cloud_overriden"]
+                        },
+                    },
+                    {
+                        "selector": {
+                            "series": series_selector,
+                            "cloud": series_cloud_selector,
+                        },
+                        "affordances": {"some_affordance": ["both_overriden"]},
+                    },
+                ],
+            }
+        }
+
+        expected = {
+            "entitlement": {
+                "affordances": {"some_affordance": [expected_value]}
+            }
+        }
+
+        apply_contract_overrides(orig_access)
+        assert orig_access == expected
+
+    @mock.patch(
+        "uaclient.system.get_platform_info", return_value={"series": "ubuntuX"}
+    )
+    @mock.patch(
+        "uaclient.clouds.identity.get_cloud_type",
+        return_value=("cloudX", None),
+    )
+    def test_different_overrides_applied_together(
+        self, _m_cloud_type, _m_platform_info
+    ):
+        """Apply different overrides from different matching selectors."""
+        orig_access = {
+            "entitlement": {
+                "affordances": {"some_affordance": ["original_affordance"]},
+                "directives": {"some_directive": ["original_directive"]},
+                "obligations": {"some_obligation": False},
+                "series": {
+                    "ubuntuX": {
+                        "affordances": {
+                            "new_affordance": ["new_affordance_value"]
+                        }
+                    }
+                },
+                "overrides": [
+                    {
+                        "selector": {"series": "ubuntuX"},
+                        "affordances": {
+                            "some_affordance": ["series_overriden"]
+                        },
+                    },
+                    {
+                        "selector": {"cloud": "cloudX"},
+                        "directives": {"some_directive": ["cloud_overriden"]},
+                    },
+                    {
+                        "selector": {"series": "ubuntuX", "cloud": "cloudX"},
+                        "obligations": {
+                            "new_obligation": True,
+                            "some_obligation": True,
+                        },
+                    },
+                ],
+            }
+        }
+
+        expected = {
+            "entitlement": {
+                "affordances": {
+                    "new_affordance": ["new_affordance_value"],
+                    "some_affordance": ["series_overriden"],
+                },
+                "directives": {"some_directive": ["cloud_overriden"]},
+                "obligations": {
+                    "new_obligation": True,
+                    "some_obligation": True,
+                },
+            }
+        }
+
+        apply_contract_overrides(orig_access)
+        assert orig_access == expected
+
+
+@mock.patch("uaclient.serviceclient.UAServiceClient.request_url")
+class TestRequestAutoAttach:
+    @pytest.mark.parametrize("caplog_text", [logging.DEBUG], indirect=True)
+    def test_request_for_invalid_pro_image(
+        self, m_request_url, caplog_text, FakeConfig
+    ):
+        cfg = FakeConfig()
+        contract = UAContractClient(cfg)
+
+        error_response = {
+            "code": "contract not found",
+            "message": (
+                'missing product mapping for subscription "test", '
+                'plan "pro-image", product "pro-product", '
+                'publisher "canonical", sku "pro-sku"'
+            ),
+        }
+        m_request_url.side_effect = exceptions.ContractAPIError(
+            exceptions.UrlError("test", 400),
+            error_response=error_response,
+        )
+
+        with pytest.raises(exceptions.InvalidProImage) as exc_error:
+            contract.request_auto_attach_contract_token(
+                instance=mock.MagicMock()
+            )
+
+        expected_message = INVALID_PRO_IMAGE.format(
+            msg=error_response["message"]
+        )
+        assert expected_message.msg == exc_error.value.msg
+        assert error_response["message"] in caplog_text()
+        assert exc_error.value.msg_code == "invalid-pro-image"

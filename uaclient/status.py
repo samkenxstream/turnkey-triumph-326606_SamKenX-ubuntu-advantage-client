@@ -5,19 +5,21 @@ import sys
 import textwrap
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple
 
 from uaclient import event_logger, exceptions, messages, util, version
 from uaclient.config import UAConfig
 from uaclient.contract import get_available_resources, get_contract_information
 from uaclient.defaults import ATTACH_FAIL_DATE_FORMAT, PRINT_WRAP_WIDTH
-from uaclient.entitlements import entitlement_factory
+from uaclient.entitlements import entitlement_factory, livepatch
 from uaclient.entitlements.entitlement_status import (
     ContractStatus,
     UserFacingAvailability,
     UserFacingConfigStatus,
     UserFacingStatus,
 )
+from uaclient.files import notices
+from uaclient.files.notices import Notice
 from uaclient.messages import TxtColor
 
 event = event_logger.get_event_logger()
@@ -45,6 +47,9 @@ STATUS_COLOR = {
         TxtColor.DISABLEGREY
         + UserFacingStatus.UNAVAILABLE.value
         + TxtColor.ENDC
+    ),
+    UserFacingStatus.WARNING.value: (
+        TxtColor.WARNINGYELLOW + UserFacingStatus.WARNING.value + TxtColor.ENDC
     ),
     ContractStatus.ENTITLED.value: (
         TxtColor.OKGREEN + ContractStatus.ENTITLED.value + TxtColor.ENDC
@@ -83,6 +88,7 @@ DEFAULT_STATUS = {
     "services": [],
     "execution_status": UserFacingConfigStatus.INACTIVE.value,
     "execution_details": messages.NO_ACTIVE_OPERATIONS,
+    "features": {},
     "notices": [],
     "contract": {
         "id": "",
@@ -101,22 +107,8 @@ DEFAULT_STATUS = {
 }  # type: Dict[str, Any]
 
 
-def _attached_service_status(ent, inapplicable_resources) -> Dict[str, Any]:
-    status_details = ""
-    description_override = None
-    contract_status = ent.contract_status()
-    if contract_status == ContractStatus.UNENTITLED:
-        ent_status = UserFacingStatus.UNAVAILABLE
-    else:
-        if ent.name in inapplicable_resources:
-            ent_status = UserFacingStatus.INAPPLICABLE
-            description_override = inapplicable_resources[ent.name]
-        else:
-            ent_status, details = ent.user_facing_status()
-            if details:
-                status_details = details.msg
-
-    blocked_by = [
+def _get_blocked_by_services(ent):
+    return [
         {
             "name": service.entitlement.name,
             "reason_code": service.named_msg.name,
@@ -125,6 +117,35 @@ def _attached_service_status(ent, inapplicable_resources) -> Dict[str, Any]:
         for service in ent.blocking_incompatible_services()
     ]
 
+
+def _attached_service_status(ent, inapplicable_resources) -> Dict[str, Any]:
+    warning = None
+    status_details = ""
+    description_override = ent.status_description_override()
+    contract_status = ent.contract_status()
+    available = "no" if ent.name in inapplicable_resources else "yes"
+
+    if contract_status == ContractStatus.UNENTITLED:
+        ent_status = UserFacingStatus.UNAVAILABLE
+    else:
+        if ent.name in inapplicable_resources:
+            ent_status = UserFacingStatus.INAPPLICABLE
+            description_override = inapplicable_resources[ent.name]
+        else:
+            ent_status, details = ent.user_facing_status()
+            if ent_status == UserFacingStatus.WARNING:
+                warning = {
+                    "code": details.name,
+                    "message": details.msg,
+                }
+            elif details:
+                status_details = details.msg
+
+            if ent_status == UserFacingStatus.INAPPLICABLE:
+                available = "no"
+
+    blocked_by = _get_blocked_by_services(ent)
+
     return {
         "name": ent.presentation_name,
         "description": ent.description,
@@ -132,19 +153,16 @@ def _attached_service_status(ent, inapplicable_resources) -> Dict[str, Any]:
         "status": ent_status.value,
         "status_details": status_details,
         "description_override": description_override,
-        "available": "yes" if ent.name not in inapplicable_resources else "no",
+        "available": available,
         "blocked_by": blocked_by,
+        "warning": warning,
     }
 
 
-def _attached_status(cfg) -> Dict[str, Any]:
+def _attached_status(cfg: UAConfig) -> Dict[str, Any]:
     """Return configuration of attached status as a dictionary."""
-
-    cfg.remove_notice(
-        "",
-        messages.NOTICE_DAEMON_AUTO_ATTACH_LOCK_HELD.format(operation=".*"),
-    )
-    cfg.remove_notice("", messages.NOTICE_DAEMON_AUTO_ATTACH_FAILED)
+    notices.remove(cfg.root_mode, Notice.AUTO_ATTACH_RETRY_FULL_NOTICE)
+    notices.remove(cfg.root_mode, Notice.AUTO_ATTACH_RETRY_TOTAL_FAILURE)
 
     response = copy.deepcopy(DEFAULT_STATUS)
     machineTokenInfo = cfg.machine_token["machineTokenInfo"]
@@ -152,11 +170,10 @@ def _attached_status(cfg) -> Dict[str, Any]:
     tech_support_level = UserFacingStatus.INAPPLICABLE.value
     response.update(
         {
-            "version": version.get_version(features=cfg.features),
             "machine_id": machineTokenInfo["machineId"],
             "attached": True,
             "origin": contractInfo.get("origin"),
-            "notices": cfg.read_cache("notices") or [],
+            "notices": notices.list() or [],
             "contract": {
                 "id": contractInfo["id"],
                 "name": contractInfo["name"],
@@ -165,17 +182,19 @@ def _attached_status(cfg) -> Dict[str, Any]:
                 "tech_support_level": tech_support_level,
             },
             "account": {
-                "name": cfg.accounts[0]["name"],
-                "id": cfg.accounts[0]["id"],
-                "created_at": cfg.accounts[0].get("createdAt", ""),
-                "external_account_ids": cfg.accounts[0].get(
+                "name": cfg.machine_token_file.account["name"],
+                "id": cfg.machine_token_file.account["id"],
+                "created_at": cfg.machine_token_file.account.get(
+                    "createdAt", ""
+                ),
+                "external_account_ids": cfg.machine_token_file.account.get(
                     "externalAccountIDs", []
                 ),
             },
         }
     )
     if contractInfo.get("effectiveTo"):
-        response["expires"] = cfg.contract_expiry_datetime
+        response["expires"] = cfg.machine_token_file.contract_expiry_datetime
     if contractInfo.get("effectiveFrom"):
         response["effective"] = contractInfo["effectiveFrom"]
 
@@ -202,7 +221,9 @@ def _attached_status(cfg) -> Dict[str, Any]:
         )
     response["services"].sort(key=lambda x: x.get("name", ""))
 
-    support = cfg.entitlements.get("support", {}).get("entitlement")
+    support = cfg.machine_token_file.entitlements.get("support", {}).get(
+        "entitlement"
+    )
     if support:
         supportLevel = support.get("affordances", {}).get("supportLevel")
         if supportLevel:
@@ -214,7 +235,6 @@ def _unattached_status(cfg: UAConfig) -> Dict[str, Any]:
     """Return unattached status as a dict."""
 
     response = copy.deepcopy(DEFAULT_STATUS)
-    response["version"] = version.get_version(features=cfg.features)
 
     resources = get_available_resources(cfg)
     for resource in resources:
@@ -226,6 +246,7 @@ def _unattached_status(cfg: UAConfig) -> Dict[str, Any]:
             ent_cls = entitlement_factory(
                 cfg=cfg, name=resource.get("name", "")
             )
+
         except exceptions.EntitlementNotFoundError:
             LOG.debug(
                 messages.AVAILABILITY_FROM_UNKNOWN_SERVICE.format(
@@ -234,10 +255,22 @@ def _unattached_status(cfg: UAConfig) -> Dict[str, Any]:
             )
             continue
 
+        # FIXME: we need a better generic unattached availability status
+        # that takes into account local information.
+        if (
+            ent_cls.name == "livepatch"
+            and livepatch.on_supported_kernel() is False
+        ):
+            lp = ent_cls(cfg)
+            descr_override = lp.status_description_override()
+        else:
+            descr_override = None
+
         response["services"].append(
             {
                 "name": resource.get("presentedAs", resource["name"]),
                 "description": ent_cls.description,
+                "description_override": descr_override,
                 "available": available,
             }
         )
@@ -246,13 +279,13 @@ def _unattached_status(cfg: UAConfig) -> Dict[str, Any]:
     return response
 
 
-def _handle_beta_resources(cfg, show_beta, response) -> Dict[str, Any]:
+def _handle_beta_resources(cfg, show_all, response) -> Dict[str, Any]:
     """Remove beta services from response dict if needed"""
     config_allow_beta = util.is_config_value_true(
         config=cfg.cfg, path_to_value="features.allow_beta"
     )
-    show_beta |= config_allow_beta
-    if show_beta:
+    show_all |= config_allow_beta
+    if show_all:
         return response
 
     new_response = copy.deepcopy(response)
@@ -295,7 +328,7 @@ def _get_config_status(cfg) -> Dict[str, Any]:
     status_val = userStatus.INACTIVE.value
     status_desc = messages.NO_ACTIVE_OPERATIONS
     (lock_pid, lock_holder) = cfg.check_lock_info()
-    notices = cfg.read_cache("notices") or []
+    notices_list = notices.list() or []
     if lock_pid > 0:
         status_val = userStatus.ACTIVE.value
         status_desc = messages.LOCK_HELD.format(
@@ -304,7 +337,7 @@ def _get_config_status(cfg) -> Dict[str, Any]:
     elif os.path.exists(cfg.data_path("marker-reboot-cmds")):
         status_val = userStatus.REBOOTREQUIRED.value
         operation = "configuration changes"
-        for label, description in notices:
+        for label, description in notices_list:
             if label == "Reboot required":
                 operation = description
                 break
@@ -314,13 +347,14 @@ def _get_config_status(cfg) -> Dict[str, Any]:
     return {
         "execution_status": status_val,
         "execution_details": status_desc,
-        "notices": notices,
+        "notices": notices_list,
         "config_path": cfg.cfg_path,
         "config": cfg.cfg,
+        "features": cfg.features,
     }
 
 
-def status(cfg: UAConfig, show_beta: bool = False) -> Dict[str, Any]:
+def status(cfg: UAConfig, show_all: bool = False) -> Dict[str, Any]:
     """Return status as a dict, using a cache for non-root users
 
     When unattached, get available resources from the contract service
@@ -329,30 +363,25 @@ def status(cfg: UAConfig, show_beta: bool = False) -> Dict[str, Any]:
 
     Write the status-cache when called by root.
     """
-    if os.getuid() != 0:
-        response = cast("Dict[str, Any]", cfg.read_cache("status-cache"))
-        if not response:
-            response = _unattached_status(cfg)
-    elif not cfg.is_attached:
-        response = _unattached_status(cfg)
-    else:
+    if cfg.is_attached:
         response = _attached_status(cfg)
+    else:
+        response = _unattached_status(cfg)
 
     response.update(_get_config_status(cfg))
 
-    if os.getuid() == 0:
+    if cfg.root_mode:
         cfg.write_cache("status-cache", response)
 
-        # Try to remove fix reboot notices if not applicable
-        if not util.should_reboot():
-            cfg.remove_notice(
-                "",
-                messages.ENABLE_REBOOT_REQUIRED_TMPL.format(
-                    operation="fix operation"
-                ),
-            )
+    response = _handle_beta_resources(cfg, show_all, response)
 
-    response = _handle_beta_resources(cfg, show_beta, response)
+    if not show_all:
+        available_services = [
+            service
+            for service in response.get("services", [])
+            if service.get("available", "yes") == "yes"
+        ]
+        response["services"] = available_services
 
     return response
 
@@ -374,7 +403,7 @@ def _get_entitlement_information(
 
 
 def simulate_status(
-    cfg, token: str, show_beta: bool = False
+    cfg, token: str, show_all: bool = False
 ) -> Tuple[Dict[str, Any], int]:
     """Get a status dictionary based on a token.
 
@@ -399,7 +428,6 @@ def simulate_status(
 
     response.update(
         {
-            "version": version.get_version(features=cfg.features),
             "contract": {
                 "id": contract_info.get("id", ""),
                 "name": contract_info.get("name", ""),
@@ -421,7 +449,7 @@ def simulate_status(
     now = datetime.now(timezone.utc)
     if contract_info.get("effectiveTo"):
         response["expires"] = contract_info.get("effectiveTo")
-        expiration_datetime = util.parse_rfc3339_date(response["expires"])
+        expiration_datetime = response["expires"]
         delta = expiration_datetime - now
         if delta.total_seconds() <= 0:
             message = messages.ATTACH_FORBIDDEN_EXPIRED.format(
@@ -433,7 +461,7 @@ def simulate_status(
             ret = 1
     if contract_info.get("effectiveFrom"):
         response["effective"] = contract_info.get("effectiveFrom")
-        effective_datetime = util.parse_rfc3339_date(response["effective"])
+        effective_datetime = response["effective"]
         delta = now - effective_datetime
         if delta.total_seconds() <= 0:
             message = messages.ATTACH_FORBIDDEN_NOT_YET.format(
@@ -488,7 +516,15 @@ def simulate_status(
             response["contract"]["tech_support_level"] = supportLevel
 
     response.update(_get_config_status(cfg))
-    response = _handle_beta_resources(cfg, show_beta, response)
+    response = _handle_beta_resources(cfg, show_all, response)
+
+    if not show_all:
+        available_services = [
+            service
+            for service in response.get("services", [])
+            if service.get("available", "yes") == "yes"
+        ]
+        response["services"] = available_services
 
     return response, ret
 
@@ -534,7 +570,7 @@ def get_section_column_content(
     Content lines will be center-aligned based on max value length of first
     column.
     """
-    content = [""]
+    content = []
     if header:
         content.append(header)
     template_length = max([len(pair[0]) for pair in column_data])
@@ -545,6 +581,14 @@ def get_section_column_content(
         # Then we have an empty "label" column and only descriptions
         content.extend([pair[1] for pair in column_data])
     return content
+
+
+def format_expires(expires: datetime) -> str:
+    try:
+        expires = expires.astimezone()
+    except Exception:
+        pass
+    return expires.strftime("%c %Z")
 
 
 def format_tabular(status: Dict[str, Any]) -> str:
@@ -572,10 +616,38 @@ def format_tabular(status: Dict[str, Any]) -> str:
             )
         ]
         for service in status["services"]:
-            content.append(STATUS_UNATTACHED_TMPL.format(**service))
+            descr_override = service.get("description_override")
+            description = (
+                descr_override if descr_override else service["description"]
+            )
+            content.append(
+                STATUS_UNATTACHED_TMPL.format(
+                    name=service["name"],
+                    available=service["available"],
+                    description=description,
+                )
+            )
+
+        if status.get("notices"):
+            content.extend(
+                get_section_column_content(
+                    status.get("notices") or [], header="NOTICES"
+                )
+            )
+
+        if status.get("features"):
+            content.append("\nFEATURES")
+            for key, value in sorted(status["features"].items()):
+                content.append("{}: {}".format(key, value))
+
         content.extend(["", messages.UNATTACHED.msg])
+        if livepatch.on_supported_kernel() is False:
+            content.extend(
+                ["", messages.LIVEPATCH_KERNEL_NOT_SUPPORTED_UNATTACHED]
+            )
         return "\n".join(content)
 
+    service_warnings = []
     content = [STATUS_HEADER]
     for service_status in status["services"]:
         entitled = service_status["entitled"]
@@ -589,16 +661,30 @@ def format_tabular(status: Dict[str, Any]) -> str:
             "status": colorize(service_status["status"]),
             "description": description,
         }
+        warning = service_status.get("warning", None)
+        if warning is not None:
+            warning_message = warning.get("message", None)
+            if warning_message is not None:
+                service_warnings.append(warning_message)
         content.append(STATUS_TMPL.format(**fmt_args))
     tech_support_level = status["contract"]["tech_support_level"]
 
-    if status.get("notices"):
-        content.extend(
-            get_section_column_content(
-                status.get("notices") or [], header="NOTICES"
+    if status.get("notices") or len(service_warnings) > 0:
+        content.append("")
+        content.append("NOTICES")
+        if status.get("notices"):
+            content.extend(
+                get_section_column_content(status.get("notices") or [])
             )
-        )
-    content.append("\nEnable services with: ua enable <service>")
+        if len(service_warnings) > 0:
+            content.extend(service_warnings)
+
+    if status.get("features"):
+        content.append("\nFEATURES")
+        for key, value in sorted(status["features"].items()):
+            content.append("{}: {}".format(key, value))
+
+    content.append("\nEnable services with: pro enable <service>")
     pairs = []
 
     account_name = status["account"]["name"]
@@ -610,10 +696,11 @@ def format_tabular(status: Dict[str, Any]) -> str:
         pairs.append(("Subscription", contract_name))
 
     if status["origin"] != "free":
-        pairs.append(("Valid until", str(status["expires"])))
+        pairs.append(("Valid until", format_expires(status["expires"])))
         pairs.append(("Technical support level", colorize(tech_support_level)))
 
     if pairs:
+        content.append("")
         content.extend(get_section_column_content(column_data=pairs))
 
     return "\n".join(content)

@@ -1,5 +1,5 @@
 @uses.config.contract_token
-Feature: Enable command behaviour when attached to an UA subscription
+Feature: Enable command behaviour when attached to an Ubuntu Pro subscription
 
     @slow
     @series.xenial
@@ -8,12 +8,12 @@ Feature: Enable command behaviour when attached to an UA subscription
     Scenario Outline: Attached enable Common Criteria service in an ubuntu lxd container
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        Then I verify that running `ua enable cc-eal` `as non-root` exits `1`
+        Then I verify that running `pro enable cc-eal` `as non-root` exits `1`
         And I will see the following on stderr:
             """
             This command must be run as root (try using sudo).
             """
-        When I run `ua enable cc-eal` with sudo
+        When I run `pro enable cc-eal` with sudo
         Then I will see the following on stdout:
             """
             One moment, checking your subscription first
@@ -28,18 +28,40 @@ Feature: Enable command behaviour when attached to an UA subscription
             | xenial  |
             | bionic  |
 
+    @series.xenial
+    @series.bionic
+    @uses.config.machine_type.lxd.container
+    Scenario Outline: Enable cc-eal with --access-only
+        Given a `<release>` machine with ubuntu-advantage-tools installed
+        When I attach `contract_token` with sudo
+        When I run `pro enable cc-eal --access-only` with sudo
+        Then I will see the following on stdout:
+        """
+        One moment, checking your subscription first
+        Updating package lists
+        Skipping installing packages: ubuntu-commoncriteria
+        CC EAL2 access enabled
+        """
+        Then I verify that running `apt-get install ubuntu-commoncriteria` `with sudo` exits `0`
+        Examples: ubuntu release
+            | release |
+            | xenial  |
+            | bionic  |
+
     @series.focal
-    @series.impish
+    @series.jammy
+    @series.kinetic
+    @series.lunar
     @uses.config.machine_type.lxd.container
     Scenario Outline: Attached enable Common Criteria service in an ubuntu lxd container
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        Then I verify that running `ua enable cc-eal` `as non-root` exits `1`
+        Then I verify that running `pro enable cc-eal` `as non-root` exits `1`
         And I will see the following on stderr:
             """
             This command must be run as root (try using sudo).
             """
-        When I verify that running `ua enable cc-eal` `with sudo` exits `1`
+        When I verify that running `pro enable cc-eal` `with sudo` exits `1`
         Then I will see the following on stdout:
             """
             One moment, checking your subscription first
@@ -48,8 +70,9 @@ Feature: Enable command behaviour when attached to an UA subscription
         Examples: ubuntu release
             | release | version    | full_name        |
             | focal   | 20.04 LTS  | Focal Fossa      |
-            | impish  | 21.10      | Impish Indri     |
-            | jammy   | 22.04      | Jammy Jellyfish  |
+            | jammy   | 22.04 LTS  | Jammy Jellyfish  |
+            | kinetic | 22.10      | Kinetic Kudu     |
+            | lunar   | 23.04      | Lunar Lobster    |
 
     @series.lts
     @uses.config.machine_type.lxd.container
@@ -78,11 +101,11 @@ Feature: Enable command behaviour when attached to an UA subscription
         features:
           machine_token_overlay: "/tmp/machine-token-overlay.json"
         """
-        When I verify that running `ua enable esm-infra` `with sudo` exits `1`
+        When I verify that running `pro enable esm-infra` `with sudo` exits `1`
         Then stdout matches regexp:
         """
         One moment, checking your subscription first
-        UA Infra: ESM is not available for Ubuntu .*
+        Ubuntu Pro: ESM Infra is not available for Ubuntu .*
         """
         When I create the file `/tmp/machine-token-overlay.json` with the following:
         """
@@ -101,12 +124,12 @@ Feature: Enable command behaviour when attached to an UA subscription
             }
         }
         """
-        When I verify that running `ua enable esm-infra` `with sudo` exits `0`
+        When I verify that running `pro enable esm-infra` `with sudo` exits `0`
         Then stdout matches regexp:
         """
         One moment, checking your subscription first
         Updating package lists
-        UA Infra: ESM enabled
+        Ubuntu Pro: ESM Infra enabled
         """
         Examples: ubuntu release
             | release |
@@ -120,58 +143,58 @@ Feature: Enable command behaviour when attached to an UA subscription
     Scenario Outline: Attached enable of different services using json format
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        Then I verify that running `ua enable foobar --format json` `as non-root` exits `1`
+        Then I verify that running `pro enable foobar --format json` `as non-root` exits `1`
         And stdout is a json matching the `ua_operation` schema
         And I will see the following on stdout:
             """
             {"_schema_version": "0.1", "errors": [{"message": "json formatted response requires --assume-yes flag.", "message_code": "json-format-require-assume-yes", "service": null, "type": "system"}], "failed_services": [], "needs_reboot": false, "processed_services": [], "result": "failure", "warnings": []}
             """
-        Then I verify that running `ua enable foobar --format json` `with sudo` exits `1`
+        Then I verify that running `pro enable foobar --format json` `with sudo` exits `1`
         And stdout is a json matching the `ua_operation` schema
         And I will see the following on stdout:
             """
             {"_schema_version": "0.1", "errors": [{"message": "json formatted response requires --assume-yes flag.", "message_code": "json-format-require-assume-yes", "service": null, "type": "system"}], "failed_services": [], "needs_reboot": false, "processed_services": [], "result": "failure", "warnings": []}
             """
-        Then I verify that running `ua enable foobar --format json --assume-yes` `as non-root` exits `1`
+        Then I verify that running `pro enable foobar --format json --assume-yes` `as non-root` exits `1`
         And stdout is a json matching the `ua_operation` schema
         And I will see the following on stdout:
             """
             {"_schema_version": "0.1", "errors": [{"message": "This command must be run as root (try using sudo).", "message_code": "nonroot-user", "service": null, "type": "system"}], "failed_services": [], "needs_reboot": false, "processed_services": [], "result": "failure", "warnings": []}
             """
-        And I verify that running `ua enable foobar --format json --assume-yes` `with sudo` exits `1`
+        And I verify that running `pro enable foobar --format json --assume-yes` `with sudo` exits `1`
         And stdout is a json matching the `ua_operation` schema
         And I will see the following on stdout:
             """
             {"_schema_version": "0.1", "errors": [{"message": "Cannot enable unknown service 'foobar'.\nTry <valid_services>", "message_code": "invalid-service-or-failure", "service": null, "type": "system"}], "failed_services": ["foobar"], "needs_reboot": false, "processed_services": [], "result": "failure", "warnings": []}
             """
-        And I verify that running `ua enable ros foobar --format json --assume-yes` `with sudo` exits `1`
+        And I verify that running `pro enable blah foobar --format json --assume-yes` `with sudo` exits `1`
         And stdout is a json matching the `ua_operation` schema
         And I will see the following on stdout:
         """
-        {"_schema_version": "0.1", "errors": [{"message": "Cannot enable unknown service 'foobar, ros'.\nTry <valid_services>", "message_code": "invalid-service-or-failure", "service": null, "type": "system"}], "failed_services": ["foobar", "ros"], "needs_reboot": false, "processed_services": [], "result": "failure", "warnings": []}
+        {"_schema_version": "0.1", "errors": [{"message": "Cannot enable unknown service 'blah, foobar'.\nTry <valid_services>", "message_code": "invalid-service-or-failure", "service": null, "type": "system"}], "failed_services": ["blah", "foobar"], "needs_reboot": false, "processed_services": [], "result": "failure", "warnings": []}
         """
-        And I verify that running `ua enable esm-infra --format json --assume-yes` `with sudo` exits `1`
+        And I verify that running `pro enable esm-infra --format json --assume-yes` `with sudo` exits `1`
         And stdout is a json matching the `ua_operation` schema
         Then I will see the following on stdout:
-            """
-            {"_schema_version": "0.1", "errors": [{"message": "UA Infra: ESM is already enabled.\nSee: sudo ua status", "message_code": "service-already-enabled", "service": "esm-infra", "type": "service"}], "failed_services": ["esm-infra"], "needs_reboot": false, "processed_services": [], "result": "failure", "warnings": []}
-            """
-        When I run `ua disable esm-infra` with sudo
-        And I run `ua enable esm-infra --format json --assume-yes` with sudo
+        """
+        {"_schema_version": "0.1", "errors": [{"message": "Ubuntu Pro: ESM Infra is already enabled.\nSee: sudo pro status", "message_code": "service-already-enabled", "service": "esm-infra", "type": "service"}], "failed_services": ["esm-infra"], "needs_reboot": false, "processed_services": [], "result": "failure", "warnings": []}
+        """
+        When I run `pro disable esm-infra` with sudo
+        And I run `pro enable esm-infra --format json --assume-yes` with sudo
         Then stdout is a json matching the `ua_operation` schema
         And I will see the following on stdout:
         """
         {"_schema_version": "0.1", "errors": [], "failed_services": [], "needs_reboot": false, "processed_services": ["esm-infra"], "result": "success", "warnings": []}
         """
-        When I run `ua disable esm-infra` with sudo
-        And I verify that running `ua enable esm-infra foobar --format json --assume-yes` `with sudo` exits `1`
+        When I run `pro disable esm-infra` with sudo
+        And I verify that running `pro enable esm-infra foobar --format json --assume-yes` `with sudo` exits `1`
         Then stdout is a json matching the `ua_operation` schema
         And I will see the following on stdout:
         """
         {"_schema_version": "0.1", "errors": [{"message": "Cannot enable unknown service 'foobar'.\nTry <valid_services>", "message_code": "invalid-service-or-failure", "service": null, "type": "system"}], "failed_services": ["foobar"], "needs_reboot": false, "processed_services": ["esm-infra"], "result": "failure", "warnings": []}
         """
-        When I run `ua disable esm-infra esm-apps` with sudo
-        And I run `ua enable esm-infra esm-apps --beta --format json --assume-yes` with sudo
+        When I run `pro disable esm-infra esm-apps` with sudo
+        And I run `pro enable esm-infra esm-apps --beta --format json --assume-yes` with sudo
         Then stdout is a json matching the `ua_operation` schema
         And I will see the following on stdout:
         """
@@ -179,49 +202,49 @@ Feature: Enable command behaviour when attached to an UA subscription
         """
 
         Examples: ubuntu release
-           | release | valid_services                                         |
-           | xenial  | cc-eal, cis, esm-infra, fips, fips-updates, livepatch. |
-           | bionic  | cc-eal, cis, esm-infra, fips, fips-updates, livepatch. |
-           | focal   | cc-eal, esm-infra, fips, fips-updates, livepatch, usg. |
-           | jammy   | cc-eal, cis, esm-infra, fips, fips-updates, livepatch. |
+           | release | valid_services                                                                                       |
+           | xenial  | cc-eal, cis, esm-apps, esm-infra, fips, fips-updates, livepatch,\nrealtime-kernel, ros, ros-updates. |
+           | bionic  | cc-eal, cis, esm-apps, esm-infra, fips, fips-updates, livepatch,\nrealtime-kernel, ros, ros-updates. |
+           | focal   | cc-eal, esm-apps, esm-infra, fips, fips-updates, livepatch, realtime-kernel,\nros, ros-updates, usg. |
+           | jammy   | cc-eal, esm-apps, esm-infra, fips, fips-updates, livepatch, realtime-kernel,\nros, ros-updates, usg. |
 
     @series.lts
     @uses.config.machine_type.lxd.container
     Scenario Outline: Attached enable of a service in a ubuntu machine
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        Then I verify that running `ua enable foobar` `as non-root` exits `1`
+        Then I verify that running `pro enable foobar` `as non-root` exits `1`
         And I will see the following on stderr:
-            """
-            This command must be run as root (try using sudo).
-            """
-        And I verify that running `ua enable foobar` `with sudo` exits `1`
+        """
+        This command must be run as root (try using sudo).
+        """
+        And I verify that running `pro enable foobar` `with sudo` exits `1`
         And I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            """
+        """
+        One moment, checking your subscription first
+        """
         And stderr matches regexp:
-            """
-            Cannot enable unknown service 'foobar'.
-            Try cc-eal, cis, esm-infra, fips, fips-updates, livepatch.
-            """
-        And I verify that running `ua enable ros foobar` `with sudo` exits `1`
+        """
+        Cannot enable unknown service 'foobar'.
+        Try cc-eal, cis, esm-apps, esm-infra, fips, fips-updates, livepatch,\nrealtime-kernel, ros, ros-updates.
+        """
+        And I verify that running `pro enable blah foobar` `with sudo` exits `1`
         And I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            """
+        """
+        One moment, checking your subscription first
+        """
         And stderr matches regexp:
-            """
-            Cannot enable unknown service 'foobar, ros'.
-            Try cc-eal, cis, esm-infra, fips, fips-updates, livepatch.
-            """
-        And I verify that running `ua enable esm-infra` `with sudo` exits `1`
+        """
+        Cannot enable unknown service 'blah, foobar'.
+        Try cc-eal, cis, esm-apps, esm-infra, fips, fips-updates, livepatch,\nrealtime-kernel, ros, ros-updates.
+        """
+        And I verify that running `pro enable esm-infra` `with sudo` exits `1`
         And I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            UA Infra: ESM is already enabled.
-            See: sudo ua status
-            """
+        """
+        One moment, checking your subscription first
+        Ubuntu Pro: ESM Infra is already enabled.
+        See: sudo pro status
+        """
         When I run `apt-cache policy` with sudo
         Then apt-cache policy for the following url has permission `500`
         """
@@ -233,7 +256,6 @@ Feature: Enable command behaviour when attached to an UA subscription
         Then stdout matches regexp:
         """
         \s*500 <esm-infra-url> <release>-infra-security/main amd64 Packages
-        \s*500 <esm-infra-url> <release>-infra-updates/main amd64 Packages
         """
 
         Examples: ubuntu release
@@ -246,38 +268,38 @@ Feature: Enable command behaviour when attached to an UA subscription
     Scenario: Attached enable of a service in a ubuntu machine
         Given a `focal` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        Then I verify that running `ua enable foobar` `as non-root` exits `1`
+        Then I verify that running `pro enable foobar` `as non-root` exits `1`
         And I will see the following on stderr:
-            """
-            This command must be run as root (try using sudo).
-            """
-        And I verify that running `ua enable foobar` `with sudo` exits `1`
+        """
+        This command must be run as root (try using sudo).
+        """
+        And I verify that running `pro enable foobar` `with sudo` exits `1`
         And I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            """
+        """
+        One moment, checking your subscription first
+        """
         And stderr matches regexp:
-            """
-            Cannot enable unknown service 'foobar'.
-            Try cc-eal, esm-infra, fips, fips-updates, livepatch, usg.
-            """
-        And I verify that running `ua enable ros foobar` `with sudo` exits `1`
+        """
+        Cannot enable unknown service 'foobar'.
+        Try cc-eal, esm-apps, esm-infra, fips, fips-updates, livepatch, realtime-kernel,\nros, ros-updates, usg.
+        """
+        And I verify that running `pro enable blah foobar` `with sudo` exits `1`
         And I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            """
+        """
+        One moment, checking your subscription first
+        """
         And stderr matches regexp:
-            """
-            Cannot enable unknown service 'foobar, ros'.
-            Try cc-eal, esm-infra, fips, fips-updates, livepatch, usg.
-            """
-        And I verify that running `ua enable esm-infra` `with sudo` exits `1`
+        """
+        Cannot enable unknown service 'blah, foobar'.
+        Try cc-eal, esm-apps, esm-infra, fips, fips-updates, livepatch, realtime-kernel,\nros, ros-updates, usg.
+        """
+        And I verify that running `pro enable esm-infra` `with sudo` exits `1`
         Then I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            UA Infra: ESM is already enabled.
-            See: sudo ua status
-            """
+        """
+        One moment, checking your subscription first
+        Ubuntu Pro: ESM Infra is already enabled.
+        See: sudo pro status
+        """
         When I run `apt-cache policy` with sudo
         Then apt-cache policy for the following url has permission `500`
         """
@@ -297,12 +319,12 @@ Feature: Enable command behaviour when attached to an UA subscription
     Scenario Outline:  Attached enable of non-container services in a ubuntu lxd container
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        Then I verify that running `ua enable livepatch` `as non-root` exits `1`
+        Then I verify that running `pro enable livepatch` `as non-root` exits `1`
         And I will see the following on stderr:
             """
             This command must be run as root (try using sudo).
             """
-        And I verify that running `ua enable livepatch` `with sudo` exits `1`
+        And I verify that running `pro enable livepatch` `with sudo` exits `1`
         And I will see the following on stdout:
             """
             One moment, checking your subscription first
@@ -314,8 +336,9 @@ Feature: Enable command behaviour when attached to an UA subscription
            | bionic  |
            | focal   |
            | xenial  |
-           | impish  |
            | jammy   |
+           | kinetic |
+           | lunar   |
 
     @series.lts
     @uses.config.machine_type.lxd.container
@@ -342,17 +365,17 @@ Feature: Enable command behaviour when attached to an UA subscription
           machine_token_overlay: "/tmp/machine-token-overlay.json"
         """
         When I attach `contract_token` with sudo
-        Then I verify that running `ua enable esm-apps` `as non-root` exits `1`
+        Then I verify that running `pro enable esm-apps` `as non-root` exits `1`
         And I will see the following on stderr:
             """
             This command must be run as root (try using sudo).
             """
-        And I verify that running `ua enable esm-apps --beta` `with sudo` exits `1`
+        And I verify that running `pro enable esm-apps --beta` `with sudo` exits `1`
         And I will see the following on stdout:
             """
             One moment, checking your subscription first
-            This subscription is not entitled to UA Apps: ESM
-            For more information see: https://ubuntu.com/advantage.
+            This subscription is not entitled to Ubuntu Pro: ESM Apps
+            For more information see: https://ubuntu.com/pro.
             """
 
         Examples: not entitled services
@@ -368,15 +391,25 @@ Feature: Enable command behaviour when attached to an UA subscription
     Scenario Outline: Attached enable of cis service in a ubuntu machine
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        And I verify that running `ua enable cis` `with sudo` exits `0`
+        And I verify that running `pro enable cis --access-only` `with sudo` exits `0`
         Then I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            Updating package lists
-            Installing CIS Audit packages
-            CIS Audit enabled
-            Visit https://ubuntu.com/security/cis to learn how to use CIS
-            """
+        """
+        One moment, checking your subscription first
+        Updating package lists
+        Skipping installing packages: usg-cisbenchmark usg-common
+        CIS Audit access enabled
+        Visit https://ubuntu.com/security/cis to learn how to use CIS
+        """
+        When I run `pro disable cis` with sudo
+        And I verify that running `pro enable cis` `with sudo` exits `0`
+        Then I will see the following on stdout:
+        """
+        One moment, checking your subscription first
+        Updating package lists
+        Installing CIS Audit packages
+        CIS Audit enabled
+        Visit https://ubuntu.com/security/cis to learn how to use CIS
+        """
         When I run `apt-cache policy usg-cisbenchmark` as non-root
         Then stdout does not match regexp:
         """
@@ -395,12 +428,12 @@ Feature: Enable command behaviour when attached to an UA subscription
         """
         \s* 500 https://esm.ubuntu.com/cis/ubuntu <release>/main amd64 Packages
         """
-        When I verify that running `ua enable cis` `with sudo` exits `1`
+        When I verify that running `pro enable cis` `with sudo` exits `1`
         Then stdout matches regexp
         """
         One moment, checking your subscription first
         CIS Audit is already enabled.
-        See: sudo ua status
+        See: sudo pro status
         """
         When I run `cis-audit level1_server` with sudo
         Then stdout matches regexp
@@ -442,12 +475,12 @@ Feature: Enable command behaviour when attached to an UA subscription
     Scenario Outline: Attached enable of cis service in a ubuntu machine
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        And I verify that running `ua enable cis` `with sudo` exits `0`
+        And I verify that running `pro enable cis` `with sudo` exits `0`
         Then I will see the following on stdout:
             """
             One moment, checking your subscription first
-            From Ubuntu 20.04 and onwards 'ua enable cis' has been
-            replaced by 'ua enable usg'. See more information at:
+            From Ubuntu 20.04 and onwards 'pro enable cis' has been
+            replaced by 'pro enable usg'. See more information at:
             https://ubuntu.com/security/certifications/docs/usg
             Updating package lists
             Installing CIS Audit packages
@@ -472,15 +505,15 @@ Feature: Enable command behaviour when attached to an UA subscription
         """
         \s* 500 https://esm.ubuntu.com/cis/ubuntu <release>/main amd64 Packages
         """
-        When I verify that running `ua enable cis` `with sudo` exits `1`
+        When I verify that running `pro enable cis` `with sudo` exits `1`
         Then stdout matches regexp
         """
         One moment, checking your subscription first
-        From Ubuntu 20.04 and onwards 'ua enable cis' has been
-        replaced by 'ua enable usg'. See more information at:
+        From Ubuntu 20.04 and onwards 'pro enable cis' has been
+        replaced by 'pro enable usg'. See more information at:
         https://ubuntu.com/security/certifications/docs/usg
         CIS Audit is already enabled.
-        See: sudo ua status
+        See: sudo pro status
         """
         When I run `cis-audit level1_server` with sudo
         Then stdout matches regexp
@@ -522,16 +555,16 @@ Feature: Enable command behaviour when attached to an UA subscription
     Scenario Outline: Attached enable of usg service in a ubuntu machine
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        And I verify that running `ua enable usg` `with sudo` exits `1`
+        And I verify that running `pro enable usg` `with sudo` exits `1`
         Then I will see the following on stdout:
-            """
-            One moment, checking your subscription first
-            """
-        Then I will see the following on stderr:
-            """
-            Cannot enable unknown service 'usg'.
-            Try cc-eal, cis, esm-infra, fips, fips-updates, livepatch.
-            """
+        """
+        One moment, checking your subscription first
+        """
+        And stderr matches regexp:
+        """
+        Cannot enable unknown service 'usg'.
+        Try cc-eal, cis, esm-apps, esm-infra, fips, fips-updates, livepatch,\nrealtime-kernel.
+        """
 
         Examples: cis service
            | release |
@@ -543,7 +576,7 @@ Feature: Enable command behaviour when attached to an UA subscription
     Scenario Outline: Attached enable of usg service in a focal machine
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        And I run `ua enable usg` with sudo
+        And I run `pro enable usg` with sudo
         Then I will see the following on stdout:
             """
             One moment, checking your subscription first
@@ -551,44 +584,44 @@ Feature: Enable command behaviour when attached to an UA subscription
             Ubuntu Security Guide enabled
             Visit https://ubuntu.com/security/certifications/docs/usg for the next steps
             """
-        When I run `ua status` with sudo
+        When I run `pro status` with sudo
         Then stdout matches regexp:
             """
             usg         +yes    +enabled   +Security compliance and audit tools
             """
-        When I run `ua disable usg` with sudo
+        When I run `pro disable usg` with sudo
         Then stdout matches regexp:
             """
             Updating package lists
             """
-        When I run `ua status` with sudo
+        When I run `pro status` with sudo
         Then stdout matches regexp:
             """
             usg         +yes    +disabled   +Security compliance and audit tools
             """
-        When I run `ua enable cis` with sudo
+        When I run `pro enable cis` with sudo
         Then I will see the following on stdout:
             """
             One moment, checking your subscription first
-            From Ubuntu 20.04 and onwards 'ua enable cis' has been
-            replaced by 'ua enable usg'. See more information at:
+            From Ubuntu 20.04 and onwards 'pro enable cis' has been
+            replaced by 'pro enable usg'. See more information at:
             https://ubuntu.com/security/certifications/docs/usg
             Updating package lists
             Installing CIS Audit packages
             CIS Audit enabled
             Visit https://ubuntu.com/security/cis to learn how to use CIS
             """
-        When I run `ua status` with sudo
+        When I run `pro status` with sudo
         Then stdout matches regexp:
             """
             usg         +yes    +enabled   +Security compliance and audit tools
             """
-        When I run `ua disable usg` with sudo
+        When I run `pro disable usg` with sudo
         Then stdout matches regexp:
             """
             Updating package lists
             """
-        When I run `ua status` with sudo
+        When I run `pro status` with sudo
         Then stdout matches regexp:
             """
             usg         +yes    +disabled   +Security compliance and audit tools
@@ -604,32 +637,77 @@ Feature: Enable command behaviour when attached to an UA subscription
     Scenario Outline: Attached disable of livepatch in a lxd vm
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        And I run `ua status` with sudo
+        And I run `pro status` with sudo
         Then stdout matches regexp:
         """
-        esm-apps     +yes      +enabled  +UA Apps: Extended Security Maintenance \(ESM\)
-        esm-infra    +yes      +enabled  +UA Infra: Extended Security Maintenance \(ESM\)
+        esm-apps     +yes      +enabled  +Expanded Security Maintenance for Applications
+        esm-infra    +yes      +enabled  +Expanded Security Maintenance for Infrastructure
         fips         +yes      +disabled +NIST-certified core packages
         fips-updates +yes      +disabled +NIST-certified core packages with priority security updates
         livepatch    +yes      +enabled  +Canonical Livepatch service
         """
-        When I run `ua disable livepatch` with sudo
+        When I run `pro disable livepatch` with sudo
         Then I verify that running `canonical-livepatch status` `with sudo` exits `1`
         And stderr matches regexp:
         """
         Machine is not enabled. Please run 'sudo canonical-livepatch enable' with the
         token obtained from https://ubuntu.com/livepatch.
         """
-        When I run `ua status` with sudo
+        When I run `pro status` with sudo
         Then stdout matches regexp:
         """
-        esm-apps     +yes      +enabled  +UA Apps: Extended Security Maintenance \(ESM\)
-        esm-infra    +yes      +enabled  +UA Infra: Extended Security Maintenance \(ESM\)
+        esm-apps     +yes      +enabled  +Expanded Security Maintenance for Applications
+        esm-infra    +yes      +enabled  +Expanded Security Maintenance for Infrastructure
         fips         +yes      +disabled +NIST-certified core packages
         fips-updates +yes      +disabled +NIST-certified core packages with priority security updates
         livepatch    +yes      +disabled +Canonical Livepatch service
         """
+        When I verify that running `pro enable livepatch --access-only` `with sudo` exits `1`
+        Then I will see the following on stdout:
+        """
+        One moment, checking your subscription first
+        Livepatch does not support being enabled with --access-only
+        """
 
+        Examples: ubuntu release
+           | release |
+           | xenial  |
+           | bionic  |
+
+    @series.xenial
+    @series.bionic
+    @uses.config.machine_type.lxd.vm
+    Scenario Outline: Attach works when snapd cannot be installed
+        Given a `<release>` machine with ubuntu-advantage-tools installed
+        When I run `apt-get remove -y snapd` with sudo
+        And I create the file `/etc/apt/preferences.d/no-snapd` with the following
+        """
+        Package: snapd
+        Pin: release o=*
+        Pin-Priority: -10
+        """
+        And I run `apt-get update` with sudo
+        When I attempt to attach `contract_token` with sudo
+        Then I will see the following on stderr:
+        """
+        Enabling default service esm-apps
+        Enabling default service esm-infra
+        Enabling default service livepatch
+        Failed to enable default services, check: sudo pro status
+        """
+        When I run `pro status` with sudo
+        Then stdout matches regexp:
+        """
+        livepatch +yes +disabled
+        """
+        Then I verify that running `pro enable livepatch` `with sudo` exits `1`
+        Then I will see the following on stdout:
+        """
+        One moment, checking your subscription first
+        Installing snapd
+        Updating package lists
+        Failed to install snapd on the system
+        """
         Examples: ubuntu release
            | release |
            | xenial  |
@@ -651,7 +729,7 @@ Feature: Enable command behaviour when attached to an UA subscription
             Installing canonical-livepatch snap
             Canonical livepatch enabled
             """
-        When I run `ua status` with sudo
+        When I run `pro status` with sudo
         Then stdout matches regexp:
             """
             livepatch +yes +enabled
@@ -666,8 +744,76 @@ Feature: Enable command behaviour when attached to an UA subscription
            | release |
            | xenial  |
            | bionic  |
-           | focal   |
-           | jammy   |
+
+
+    @series.xenial
+    @uses.config.machine_type.lxd.vm
+    Scenario Outline: Attached enable livepatch
+        Given a `<release>` machine with ubuntu-advantage-tools installed
+        When I attach `contract_token` with sudo
+        Then stdout matches regexp:
+        """
+        Installing canonical-livepatch snap
+        Canonical livepatch enabled
+        """
+        When I run `pro status` with sudo
+        Then stdout matches regexp:
+        """
+        livepatch +yes +enabled
+        """
+        When I run `pro api u.pro.security.status.reboot_required.v1` with sudo
+        Then stdout matches regexp:
+        """
+        {"_schema_version": "v1", "data": {"attributes": {"reboot_required": "no"}, "meta": {"environment_vars": \[\]}, "type": "RebootRequired"}, "errors": \[\], "result": "success", "version": ".*", "warnings": \[\]}
+        """
+        When I run `pro system reboot-required` as non-root
+        Then I will see the following on stdout:
+        """
+        no
+        """
+        When I run `apt-get install libc6 -y` with sudo
+        And I run `pro api u.pro.security.status.reboot_required.v1` as non-root
+        Then stdout matches regexp:
+        """
+        {"_schema_version": "v1", "data": {"attributes": {"reboot_required": "yes"}, "meta": {"environment_vars": \[\]}, "type": "RebootRequired"}, "errors": \[\], "result": "success", "version": ".*", "warnings": \[\]}
+        """
+        When I run `pro system reboot-required` as non-root
+        Then I will see the following on stdout:
+        """
+        yes
+        """
+        When I reboot the machine
+        And I run `pro system reboot-required` as non-root
+        Then I will see the following on stdout:
+        """
+        no
+        """
+        When I run `apt-get install linux-image-generic -y` with sudo
+        And I run `pro api u.pro.security.status.reboot_required.v1` as non-root
+        Then stdout matches regexp:
+        """
+        {"_schema_version": "v1", "data": {"attributes": {"reboot_required": "yes-kernel-livepatches-applied"}, "meta": {"environment_vars": \[\]}, "type": "RebootRequired"}, "errors": \[\], "result": "success", "version": ".*", "warnings": \[\]}
+        """
+        When I run `pro system reboot-required` as non-root
+        Then I will see the following on stdout:
+        """
+        yes-kernel-livepatches-applied
+        """
+        When I run `apt-get install dbus -y` with sudo
+        And I run `pro api u.pro.security.status.reboot_required.v1` with sudo
+        Then stdout matches regexp:
+        """
+        {"_schema_version": "v1", "data": {"attributes": {"reboot_required": "yes"}, "meta": {"environment_vars": \[\]}, "type": "RebootRequired"}, "errors": \[\], "result": "success", "version": ".*", "warnings": \[\]}
+        """
+        When I run `pro system reboot-required` as non-root
+        Then I will see the following on stdout:
+        """
+        yes
+        """
+
+        Examples: ubuntu release
+           | release |
+           | xenial  |
 
     @slow
     @series.bionic
@@ -678,12 +824,12 @@ Feature: Enable command behaviour when attached to an UA subscription
         Then stdout matches regexp:
             """
             Updating package lists
-            UA Infra: ESM enabled
+            Ubuntu Pro: ESM Infra enabled
             Installing canonical-livepatch snap
             Canonical livepatch enabled
             """
-        When I run `ua disable livepatch` with sudo
-        And I run `ua enable fips --assume-yes` with sudo
+        When I run `pro disable livepatch` with sudo
+        And I run `pro enable fips --assume-yes` with sudo
         Then I will see the following on stdout:
             """
             One moment, checking your subscription first
@@ -697,13 +843,13 @@ Feature: Enable command behaviour when attached to an UA subscription
             features:
               block_disable_on_enable: true
             """
-        Then I verify that running `ua enable livepatch` `with sudo` exits `1`
+        Then I verify that running `pro enable livepatch` `with sudo` exits `1`
         And I will see the following on stdout
             """
             One moment, checking your subscription first
             Cannot enable Livepatch when FIPS is enabled.
             """
-        Then I verify that running `ua enable livepatch --format json --assume-yes` `with sudo` exits `1`
+        Then I verify that running `pro enable livepatch --format json --assume-yes` `with sudo` exits `1`
         And I will see the following on stdout
             """
             {"_schema_version": "0.1", "errors": [{"message": "Cannot enable Livepatch when FIPS is enabled.", "message_code": "livepatch-error-when-fips-enabled", "service": "livepatch", "type": "service"}], "failed_services": ["livepatch"], "needs_reboot": false, "processed_services": [], "result": "failure", "warnings": []}
@@ -717,7 +863,7 @@ Feature: Enable command behaviour when attached to an UA subscription
         Then stdout matches regexp:
             """
             Updating package lists
-            UA Infra: ESM enabled
+            Ubuntu Pro: ESM Infra enabled
             Installing canonical-livepatch snap
             Canonical livepatch enabled
             """
@@ -726,13 +872,13 @@ Feature: Enable command behaviour when attached to an UA subscription
         features:
           block_disable_on_enable: true
         """
-        Then I verify that running `ua enable fips --assume-yes` `with sudo` exits `1`
+        Then I verify that running `pro enable fips --assume-yes` `with sudo` exits `1`
         And I will see the following on stdout
             """
             One moment, checking your subscription first
             Cannot enable FIPS when Livepatch is enabled.
             """
-        Then I verify that running `ua enable fips --assume-yes --format json` `with sudo` exits `1`
+        Then I verify that running `pro enable fips --assume-yes --format json` `with sudo` exits `1`
         And stdout is a json matching the `ua_operation` schema
         And I will see the following on stdout:
         """
@@ -749,14 +895,14 @@ Feature: Enable command behaviour when attached to an UA subscription
         Then stdout matches regexp:
             """
             Updating package lists
-            UA Infra: ESM enabled
+            Ubuntu Pro: ESM Infra enabled
             """
         And stdout matches regexp:
             """
             Installing canonical-livepatch snap
             Canonical livepatch enabled
             """
-        When I run `ua enable fips --assume-yes` with sudo
+        When I run `pro enable fips --assume-yes` with sudo
         Then I will see the following on stdout
             """
             One moment, checking your subscription first
@@ -766,7 +912,7 @@ Feature: Enable command behaviour when attached to an UA subscription
             FIPS enabled
             A reboot is required to complete install.
             """
-        When I run `ua status` with sudo
+        When I run `pro status --all` with sudo
         Then stdout matches regexp:
             """
             fips +yes +enabled
@@ -790,15 +936,15 @@ Feature: Enable command behaviour when attached to an UA subscription
         When I attach `contract_token` with sudo
         Then stdout matches regexp:
             """
-            UA Infra: ESM enabled
+            Ubuntu Pro: ESM Infra enabled
             """
         And stdout matches regexp:
             """
             Installing canonical-livepatch snap
             Canonical livepatch enabled
             """
-        When I run `ua disable livepatch` with sudo
-        And I run `ua enable fips-updates --assume-yes` with sudo
+        When I run `pro disable livepatch` with sudo
+        And I run `pro enable fips-updates --assume-yes` with sudo
         Then I will see the following on stdout:
             """
             One moment, checking your subscription first
@@ -807,7 +953,7 @@ Feature: Enable command behaviour when attached to an UA subscription
             FIPS Updates enabled
             A reboot is required to complete install.
             """
-        When I verify that running `ua enable fips --assume-yes` `with sudo` exits `1`
+        When I verify that running `pro enable fips --assume-yes` `with sudo` exits `1`
         Then I will see the following on stdout
             """
             One moment, checking your subscription first
@@ -826,75 +972,75 @@ Feature: Enable command behaviour when attached to an UA subscription
     Scenario Outline: Attached enable ros on a machine
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
-        And I run `ua status --all` as non-root
+        And I run `pro status --all` as non-root
         Then stdout matches regexp
         """
         ros           +yes                disabled           Security Updates for the Robot Operating System
         """
-        When I run `ua enable ros --assume-yes --beta` with sudo
-        And I run `ua status --all` as non-root
+        When I run `pro enable ros --assume-yes` with sudo
+        And I run `pro status --all` as non-root
         Then stdout matches regexp
         """
         ros           +yes                enabled            Security Updates for the Robot Operating System
         """
         And stdout matches regexp
         """
-        esm-apps      +yes                enabled            UA Apps: Extended Security Maintenance \(ESM\)
+        esm-apps      +yes                enabled            Expanded Security Maintenance for Applications
         """
         And stdout matches regexp
         """
-        esm-infra     +yes                enabled            UA Infra: Extended Security Maintenance \(ESM\)
+        esm-infra     +yes                enabled            Expanded Security Maintenance for Infrastructure
         """
-        When I verify that running `ua disable esm-apps` `with sudo` and stdin `N` exits `1`
+        When I verify that running `pro disable esm-apps` `with sudo` and stdin `N` exits `1`
         Then stdout matches regexp
         """
-        ROS ESM Security Updates depends on UA Apps: ESM.
-        Disable ROS ESM Security Updates and proceed to disable UA Apps: ESM\? \(y\/N\) Cannot disable UA Apps: ESM when ROS ESM Security Updates is enabled.
+        ROS ESM Security Updates depends on Ubuntu Pro: ESM Apps.
+        Disable ROS ESM Security Updates and proceed to disable Ubuntu Pro: ESM Apps\? \(y\/N\) Cannot disable Ubuntu Pro: ESM Apps when ROS ESM Security Updates is enabled.
         """
-        When I run `ua disable esm-apps` `with sudo` and stdin `y`
+        When I run `pro disable esm-apps` `with sudo` and stdin `y`
         Then stdout matches regexp
         """
-        ROS ESM Security Updates depends on UA Apps: ESM.
-        Disable ROS ESM Security Updates and proceed to disable UA Apps: ESM\? \(y\/N\) Disabling dependent service: ROS ESM Security Updates
+        ROS ESM Security Updates depends on Ubuntu Pro: ESM Apps.
+        Disable ROS ESM Security Updates and proceed to disable Ubuntu Pro: ESM Apps\? \(y\/N\) Disabling dependent service: ROS ESM Security Updates
         Updating package lists
         """
-        When I run `ua status --all` as non-root
+        When I run `pro status --all` as non-root
         Then stdout matches regexp
         """
         ros           +yes                disabled           Security Updates for the Robot Operating System
         """
         And stdout matches regexp
         """
-        esm-apps      +yes                disabled           UA Apps: Extended Security Maintenance \(ESM\)
+        esm-apps      +yes                disabled           Expanded Security Maintenance for Applications
         """
-        When I verify that running `ua enable ros --beta` `with sudo` and stdin `N` exits `1`
+        When I verify that running `pro enable ros` `with sudo` and stdin `N` exits `1`
         Then stdout matches regexp
         """
-        ROS ESM Security Updates cannot be enabled with UA Apps: ESM disabled.
-        Enable UA Apps: ESM and proceed to enable ROS ESM Security Updates\? \(y\/N\) Cannot enable ROS ESM Security Updates when UA Apps: ESM is disabled.
+        ROS ESM Security Updates cannot be enabled with Ubuntu Pro: ESM Apps disabled.
+        Enable Ubuntu Pro: ESM Apps and proceed to enable ROS ESM Security Updates\? \(y\/N\) Cannot enable ROS ESM Security Updates when Ubuntu Pro: ESM Apps is disabled.
         """
-        When I run `ua enable ros --beta` `with sudo` and stdin `y`
+        When I run `pro enable ros` `with sudo` and stdin `y`
         Then stdout matches regexp
         """
         One moment, checking your subscription first
-        ROS ESM Security Updates cannot be enabled with UA Apps: ESM disabled.
-        Enable UA Apps: ESM and proceed to enable ROS ESM Security Updates\? \(y\/N\) Enabling required service: UA Apps: ESM
-        UA Apps: ESM enabled
+        ROS ESM Security Updates cannot be enabled with Ubuntu Pro: ESM Apps disabled.
+        Enable Ubuntu Pro: ESM Apps and proceed to enable ROS ESM Security Updates\? \(y\/N\) Enabling required service: Ubuntu Pro: ESM Apps
+        Ubuntu Pro: ESM Apps enabled
         Updating package lists
         ROS ESM Security Updates enabled
         """
-        When I run `ua status --all` as non-root
+        When I run `pro status --all` as non-root
         Then stdout matches regexp
         """
         ros           +yes                enabled            Security Updates for the Robot Operating System
         """
         And stdout matches regexp
         """
-        esm-apps      +yes                enabled            UA Apps: Extended Security Maintenance \(ESM\)
+        esm-apps      +yes                enabled            Expanded Security Maintenance for Applications
         """
         And stdout matches regexp
         """
-        esm-infra     +yes                enabled            UA Infra: Extended Security Maintenance \(ESM\)
+        esm-infra     +yes                enabled            Expanded Security Maintenance for Infrastructure
         """
         When I run `apt-cache policy` as non-root
         Then apt-cache policy for the following url has permission `500`
@@ -904,8 +1050,8 @@ Feature: Enable command behaviour when attached to an UA subscription
         When I run `apt install python3-catkin-pkg -y` with sudo
         Then I verify that `python3-catkin-pkg` is installed from apt source `<ros-security-source>`
 
-        When I run `ua enable ros-updates --assume-yes --beta` with sudo
-        And I run `ua status --all` as non-root
+        When I run `pro enable ros-updates --assume-yes` with sudo
+        And I run `pro status --all` as non-root
         Then stdout matches regexp
         """
         ros-updates   +yes                enabled            All Updates for the Robot Operating System
@@ -917,14 +1063,14 @@ Feature: Enable command behaviour when attached to an UA subscription
         """
         When I run `apt install python3-catkin-pkg -y` with sudo
         Then I verify that `python3-catkin-pkg` is installed from apt source `<ros-updates-source>`
-        When I run `ua disable ros` `with sudo` and stdin `y`
+        When I run `pro disable ros` `with sudo` and stdin `y`
         Then stdout matches regexp
         """
         ROS ESM All Updates depends on ROS ESM Security Updates.
         Disable ROS ESM All Updates and proceed to disable ROS ESM Security Updates\? \(y\/N\) Disabling dependent service: ROS ESM All Updates
         Updating package lists
         """
-        When I run `ua enable ros-updates --beta` `with sudo` and stdin `y`
+        When I run `pro enable ros-updates` `with sudo` and stdin `y`
         Then stdout matches regexp
         """
         One moment, checking your subscription first
@@ -934,7 +1080,7 @@ Feature: Enable command behaviour when attached to an UA subscription
         Updating package lists
         ROS ESM All Updates enabled
         """
-        When I run `ua status --all` as non-root
+        When I run `pro status --all` as non-root
         Then stdout matches regexp
         """
         ros-updates   +yes                enabled            All Updates for the Robot Operating System
@@ -943,12 +1089,12 @@ Feature: Enable command behaviour when attached to an UA subscription
         """
         ros           +yes                enabled            Security Updates for the Robot Operating System
         """
-        When I run `ua disable ros-updates --assume-yes` with sudo
-        When I run `ua disable ros --assume-yes` with sudo
-        When I run `ua disable esm-apps --assume-yes` with sudo
-        When I run `ua disable esm-infra --assume-yes` with sudo
-        When I run `ua enable ros-updates --assume-yes --beta` with sudo
-        When I run `ua status --all` as non-root
+        When I run `pro disable ros-updates --assume-yes` with sudo
+        When I run `pro disable ros --assume-yes` with sudo
+        When I run `pro disable esm-apps --assume-yes` with sudo
+        When I run `pro disable esm-infra --assume-yes` with sudo
+        When I run `pro enable ros-updates --assume-yes` with sudo
+        When I run `pro status --all` as non-root
         Then stdout matches regexp
         """
         ros-updates   +yes                enabled            All Updates for the Robot Operating System
@@ -959,13 +1105,13 @@ Feature: Enable command behaviour when attached to an UA subscription
         """
         And stdout matches regexp
         """
-        esm-apps      +yes                enabled            UA Apps: Extended Security Maintenance \(ESM\)
+        esm-apps      +yes                enabled            Expanded Security Maintenance for Applications
         """
         And stdout matches regexp
         """
-        esm-infra     +yes                enabled            UA Infra: Extended Security Maintenance \(ESM\)
+        esm-infra     +yes                enabled            Expanded Security Maintenance for Infrastructure
         """
-        When I run `ua detach` `with sudo` and stdin `y`
+        When I run `pro detach` `with sudo` and stdin `y`
         Then stdout matches regexp:
         """
         Updating package lists
@@ -1059,8 +1205,82 @@ Feature: Enable command behaviour when attached to an UA subscription
           machine_token_overlay: "/tmp/machine-token-overlay.json"
         """
         And I attach `contract_token` with sudo
-        And I verify that running `ua enable fips --assume-yes` `with sudo` exits `1`
+        And I verify that running `pro enable fips --assume-yes` `with sudo` exits `1`
         Then stderr matches regexp:
         """
         Stderr: E: Unable to locate package some-package-aws
         """
+
+    @series.xenial
+    @uses.config.contract_token
+    @uses.config.machine_type.lxd.container
+    Scenario Outline: APT auth file is edited correctly on enable
+        Given a `<release>` machine with ubuntu-advantage-tools installed
+        When I attach `contract_token` with sudo
+        When I run `wc -l /etc/apt/auth.conf.d/90ubuntu-advantage` with sudo
+        Then I will see the following on stdout:
+        """
+        2 /etc/apt/auth.conf.d/90ubuntu-advantage
+        """
+        # simulate a scenario where the line should get replaced
+        When I run `cp /etc/apt/auth.conf.d/90ubuntu-advantage /etc/apt/auth.conf.d/90ubuntu-advantage.backup` with sudo
+        When I run `pro disable esm-infra` with sudo
+        When I run `cp /etc/apt/auth.conf.d/90ubuntu-advantage.backup /etc/apt/auth.conf.d/90ubuntu-advantage` with sudo
+        When I run `pro enable esm-infra` with sudo
+        When I run `wc -l /etc/apt/auth.conf.d/90ubuntu-advantage` with sudo
+        Then I will see the following on stdout:
+        """
+        2 /etc/apt/auth.conf.d/90ubuntu-advantage
+        """
+        When I run `pro enable cis` with sudo
+        When I run `wc -l /etc/apt/auth.conf.d/90ubuntu-advantage` with sudo
+        Then I will see the following on stdout:
+        """
+        3 /etc/apt/auth.conf.d/90ubuntu-advantage
+        """
+        Examples: ubuntu release
+           | release |
+           | xenial  |
+
+    @series.lts
+    @uses.config.machine_type.lxd.container
+    Scenario Outline: Attached enable esm-apps on a machine
+        Given a `<release>` machine with ubuntu-advantage-tools installed
+        When I attach `contract_token` with sudo
+        And I run `pro status --all` as non-root
+        Then stdout matches regexp
+        """
+        esm-apps      +yes                enabled            Expanded Security Maintenance for Applications
+        """
+        And I verify that running `apt update` `with sudo` exits `0`
+        When I run `apt-cache policy` as non-root
+        Then apt-cache policy for the following url has permission `500`
+        """
+        https://esm.ubuntu.com/apps/ubuntu <release>-apps-updates/main amd64 Packages
+        """
+        And apt-cache policy for the following url has permission `500`
+        """
+        https://esm.ubuntu.com/apps/ubuntu <release>-apps-security/main amd64 Packages
+        """
+        And I verify that running `apt update` `with sudo` exits `0`
+        When I run `apt install -y <apps-pkg>` with sudo, retrying exit [100]
+        And I run `apt-cache policy <apps-pkg>` as non-root
+        Then stdout matches regexp:
+        """
+        Version table:
+        \s*\*\*\* .* 500
+        \s*500 https://esm.ubuntu.com/apps/ubuntu <release>-apps-security/main amd64 Packages
+        """
+        When I verify that running `pro enable esm-apps` `with sudo` exits `1`
+        Then stdout matches regexp
+        """
+        One moment, checking your subscription first
+        Ubuntu Pro: ESM Apps is already enabled.
+        See: sudo pro status
+        """
+
+        Examples: ubuntu release
+           | release | apps-pkg |
+           | xenial  | jq       |
+           | bionic  | bundler  |
+           | focal   | ant      |

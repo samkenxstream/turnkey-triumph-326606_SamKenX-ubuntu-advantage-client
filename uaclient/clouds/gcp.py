@@ -5,10 +5,10 @@ import os
 from typing import Any, Dict, List, Optional  # noqa: F401
 from urllib.error import HTTPError
 
-from uaclient import exceptions, messages, util
+from uaclient import exceptions, messages, system, util
 from uaclient.clouds import AutoAttachCloudInstance
 
-LOG = logging.getLogger("ua.clouds.gcp")
+LOG = logging.getLogger("pro.clouds.gcp")
 
 TOKEN_URL = (
     "http://metadata/computeMetadata/v1/instance/service-accounts/"
@@ -42,11 +42,13 @@ class UAAutoAttachGCPInstance(AutoAttachCloudInstance):
     # mypy does not handle @property around inner decorators
     # https://github.com/python/mypy/issues/1362
     @property  # type: ignore
-    @util.retry(exceptions.GCPProAccountError, retry_sleeps=[1, 2, 5])
+    @util.retry(exceptions.GCPProAccountError, retry_sleeps=[0.5, 1, 1])
     def identity_doc(self) -> Dict[str, Any]:
         try:
             headers = {"Metadata-Flavor": "Google"}
-            url_response, _headers = util.readurl(TOKEN_URL, headers=headers)
+            url_response, _headers = util.readurl(
+                TOKEN_URL, headers=headers, timeout=1
+            )
         except HTTPError as e:
             body = getattr(e, "body", None)
             error_desc = None
@@ -79,7 +81,7 @@ class UAAutoAttachGCPInstance(AutoAttachCloudInstance):
     def is_viable(self) -> bool:
         """This machine is a viable GCPInstance"""
         if os.path.exists(DMI_PRODUCT_NAME):
-            product_name = util.load_file(DMI_PRODUCT_NAME)
+            product_name = system.load_file(DMI_PRODUCT_NAME)
             if GCP_PRODUCT_NAME == product_name.strip():
                 return True
 
@@ -103,7 +105,7 @@ class UAAutoAttachGCPInstance(AutoAttachCloudInstance):
         )
 
     def should_poll_for_pro_license(self) -> bool:
-        series = util.get_platform_info()["series"]
+        series = system.get_platform_info()["series"]
         if series not in GCP_LICENSES:
             LOG.info("This series isn't supported for GCP auto-attach.")
             return False
@@ -130,5 +132,5 @@ class UAAutoAttachGCPInstance(AutoAttachCloudInstance):
         license_ids = [license["id"] for license in licenses]
         self.etag = headers.get("ETag", None)
 
-        series = util.get_platform_info()["series"]
+        series = system.get_platform_info()["series"]
         return GCP_LICENSES.get(series) in license_ids

@@ -57,13 +57,13 @@ class UserFacingAvailability(enum.Enum):
 @enum.unique
 class UserFacingConfigStatus(enum.Enum):
     """
-    An enum representing the user-visible config status of UA system.
+    An enum representing the user-visible config status of Pro system.
 
     This enum will be used in display code and will be written to status.json
     """
 
-    INACTIVE = "inactive"  # No UA config commands/daemons
-    ACTIVE = "active"  # UA command is running
+    INACTIVE = "inactive"  # No Pro config commands/daemons
+    ACTIVE = "active"  # Pro command is running
     REBOOTREQUIRED = "reboot-required"  # System Reboot required
 
 
@@ -80,6 +80,7 @@ class UserFacingStatus(enum.Enum):
     INACTIVE = "disabled"
     INAPPLICABLE = "n/a"
     UNAVAILABLE = "—"
+    WARNING = "warning"
 
 
 @enum.unique
@@ -94,6 +95,7 @@ class CanEnableFailureReason(enum.Enum):
     IS_BETA = object()
     INCOMPATIBLE_SERVICE = object()
     INACTIVE_REQUIRED_SERVICES = object()
+    ACCESS_ONLY_NOT_SUPPORTED = object()
 
 
 class CanEnableFailure:

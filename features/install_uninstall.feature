@@ -1,4 +1,4 @@
-Feature: UA Install and Uninstall related tests
+Feature: Pro Install and Uninstall related tests
 
     @series.all
     @uses.config.machine_type.lxd.container
@@ -12,8 +12,9 @@ Feature: UA Install and Uninstall related tests
            | xenial  |
            | bionic  |
            | focal   |
-           | impish  |
            | jammy   |
+           | kinetic |
+           | lunar   |
 
     @series.lts
     @uses.config.contract_token

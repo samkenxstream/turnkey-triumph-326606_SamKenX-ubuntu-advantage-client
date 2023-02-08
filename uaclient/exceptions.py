@@ -1,5 +1,5 @@
 import textwrap
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from urllib import error
 
 from uaclient import messages
@@ -21,7 +21,7 @@ class UserFacingError(Exception):
         self,
         msg: str,
         msg_code: Optional[str] = None,
-        additional_info: Optional[Dict[str, str]] = None,
+        additional_info: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.msg = msg
         self.msg_code = msg_code
@@ -97,6 +97,12 @@ class SnapdNotProperlyInstalledError(UserFacingError):
         super().__init__(msg=msg.msg, msg_code=msg.name)
 
 
+class CannotInstallSnapdError(UserFacingError):
+    def __init__(self) -> None:
+        msg = messages.CANNOT_INSTALL_SNAPD
+        super().__init__(msg=msg.msg, msg_code=msg.name)
+
+
 class ErrorInstallingLivepatch(UserFacingError):
     def __init__(self, error_msg: str) -> None:
         msg = messages.ERROR_INSTALLING_LIVEPATCH.format(error_msg=error_msg)
@@ -131,33 +137,10 @@ class ProxyInvalidUrl(UserFacingError):
         )
 
 
-class BetaServiceError(UserFacingError):
-    """
-    An exception to be raised trying to interact with beta service
-    without the right parameters.
-
-    :param msg:
-        Takes a single parameter, which is the beta service error message that
-        should be emitted before exiting non-zero.
-    """
-
-    pass
-
-
 class NonAutoAttachImageError(UserFacingError):
     """Raised when machine isn't running an auto-attach enabled image"""
 
     exit_code = 0
-
-
-class AlreadyAttachedOnPROError(UserFacingError):
-    """Raised when a PRO machine retries attaching with the same instance-id"""
-
-    exit_code = 0
-
-    def __init__(self, instance_id: str):
-        msg = messages.ALREADY_ATTACHED_ON_PRO.format(instance_id=instance_id)
-        super().__init__(msg=msg.msg, msg_code=msg.name)
 
 
 class AlreadyAttachedError(UserFacingError):
@@ -165,10 +148,8 @@ class AlreadyAttachedError(UserFacingError):
 
     exit_code = 2
 
-    def __init__(self, cfg):
-        msg = messages.ALREADY_ATTACHED.format(
-            account_name=cfg.accounts[0].get("name", "")
-        )
+    def __init__(self, account_name: str):
+        msg = messages.ALREADY_ATTACHED.format(account_name=account_name)
         super().__init__(msg=msg.msg, msg_code=msg.name)
 
 
@@ -202,8 +183,60 @@ class AttachInvalidTokenError(UserFacingError):
         )
 
 
+class ConnectivityError(UserFacingError):
+    def __init__(self):
+        super().__init__(
+            msg=messages.CONNECTIVITY_ERROR.msg,
+            msg_code=messages.CONNECTIVITY_ERROR.name,
+        )
+
+
+class MagicAttachTokenAlreadyActivated(UserFacingError):
+    def __init__(self):
+        msg = messages.MAGIC_ATTACH_TOKEN_ALREADY_ACTIVATED
+        super().__init__(
+            msg=msg.msg,
+            msg_code=msg.name,
+        )
+
+
+class MagicAttachTokenError(UserFacingError):
+    def __init__(self):
+        msg = messages.MAGIC_ATTACH_TOKEN_ERROR
+        super().__init__(
+            msg=msg.msg,
+            msg_code=msg.name,
+        )
+
+
+class MagicAttachInvalidEmail(UserFacingError):
+    def __init__(self, email: str):
+        msg = messages.MAGIC_ATTACH_INVALID_EMAIL.format(email=email)
+        super().__init__(
+            msg=msg.msg,
+            msg_code=msg.name,
+        )
+
+
+class MagicAttachUnavailable(UserFacingError):
+    def __init__(self):
+        msg = messages.MAGIC_ATTACH_UNAVAILABLE
+        super().__init__(
+            msg=msg.msg,
+            msg_code=msg.name,
+        )
+
+
+class MagicAttachInvalidParam(UserFacingError):
+    def __init__(self, param, value):
+        msg = messages.MAGIC_ATTACH_INVALID_PARAM.format(
+            param=param, value=value
+        )
+        super().__init__(msg=msg.msg, msg_code=msg.name)
+
+
 class LockHeldError(UserFacingError):
-    """An exception for when another ua operation is in progress
+    """An exception for when another pro operation is in progress
 
     :param lock_request: String of the command requesting the lock
     :param lock_holder: String of the command that currently holds the lock
@@ -212,6 +245,7 @@ class LockHeldError(UserFacingError):
 
     def __init__(self, lock_request: str, lock_holder: str, pid: int):
         self.lock_holder = lock_holder
+        self.pid = pid
         msg = messages.LOCK_HELD_ERROR.format(
             lock_request=lock_request, lock_holder=lock_holder, pid=pid
         )
@@ -258,6 +292,13 @@ class SecurityAPIMetadataError(UserFacingError):
         )
 
 
+class InvalidProImage(UserFacingError):
+    def __init__(self, error_msg: str):
+        self.contract_server_msg = error_msg
+        msg = messages.INVALID_PRO_IMAGE.format(msg=error_msg)
+        super().__init__(msg=msg.msg, msg_code=msg.name)
+
+
 class GCPProAccountError(UserFacingError):
     """An exception raised when GCP Pro service account is not enabled"""
 
@@ -288,8 +329,10 @@ class CloudFactoryNonViableCloudError(CloudFactoryError):
     pass
 
 
-class EntitlementNotFoundError(Exception):
-    pass
+class EntitlementNotFoundError(UserFacingError):
+    def __init__(self, entitlement_name: str):
+        msg = messages.ENTITLEMENT_NOT_FOUND.format(name=entitlement_name)
+        super().__init__(msg=msg.msg, msg_code=msg.name)
 
 
 class UrlError(IOError):
@@ -338,40 +381,35 @@ class ProcessExecutionError(IOError):
 class ContractAPIError(UrlError):
     def __init__(self, e, error_response):
         super().__init__(e, e.code, e.headers, e.url)
-        if "error_list" in error_response:
-            self.api_errors = error_response["error_list"]
-        else:
-            self.api_errors = [error_response]
-        for api_error in self.api_errors:
-            api_error["code"] = api_error.get("title", api_error.get("code"))
+
+        if error_response is None:
+            error_response = {}
+
+        self.api_error = error_response
 
     def __contains__(self, error_code):
-        for api_error in self.api_errors:
-            if error_code == api_error.get("code"):
-                return True
-            if api_error.get("message", "").startswith(error_code):
-                return True
+        if error_code == self.api_error.get("code"):
+            return True
+        if self.api_error.get("message", "").startswith(error_code):
+            return True
+
         return False
 
     def __get__(self, error_code, default=None):
-        for api_error in self.api_errors:
-            if api_error["code"] == error_code:
-                return api_error["detail"]
+        if self.api_error.get("code") == error_code:
+            return self.api_error.get("message")
         return default
 
     def __str__(self):
         prefix = super().__str__()
-        details = []
-        for err in self.api_errors:
-            if not err.get("extra"):
-                details.append(err.get("detail", err.get("message", "")))
-            else:
-                for extra in err["extra"].values():
-                    if isinstance(extra, list):
-                        details.extend(extra)
-                    else:
-                        details.append(extra)
-        return prefix + ": [" + self.url + "]" + ", ".join(details)
+        return (
+            prefix
+            + ": ["
+            + str(self.url)
+            + "]"
+            + ", "
+            + self.api_error.get("message", "")
+        )
 
 
 class SecurityAPIError(UrlError):
@@ -391,8 +429,8 @@ class SecurityAPIError(UrlError):
         prefix = super().__str__()
         details = [self.message]
         if details:
-            return prefix + ": [" + self.url + "] " + ", ".join(details)
-        return prefix + ": [" + self.url + "]"
+            return prefix + ": [" + str(self.url) + "] " + ", ".join(details)
+        return prefix + ": [" + str(self.url) + "]"
 
 
 class InPlaceUpgradeNotSupportedError(Exception):
@@ -409,3 +447,11 @@ class CancelProLicensePolling(IsProLicensePresentError):
 
 class DelayProLicensePolling(IsProLicensePresentError):
     pass
+
+
+class InvalidFileFormatError(UserFacingError):
+    def __init__(self, file_name: str, file_format: str) -> None:
+        msg = messages.INVALID_FILE_FORMAT.format(
+            file_name=file_name, file_format=file_format
+        )
+        super().__init__(msg=msg.msg, msg_code=msg.name)

@@ -1,6 +1,8 @@
+import datetime
 import io
 import logging
 import sys
+from enum import Enum
 from typing import Any, Dict
 
 import mock
@@ -8,25 +10,41 @@ import pytest
 
 from uaclient import event_logger
 from uaclient.config import UAConfig
+from uaclient.files.notices import NoticeFileDetails
 
 # We are doing this because we are sure that python3-apt comes with the distro,
 # but it cannot be installed in a virtual environment to be properly tested.
 sys.modules["apt"] = mock.MagicMock()
+sys.modules["apt_pkg"] = mock.MagicMock()
 
 
 @pytest.yield_fixture(scope="session", autouse=True)
 def _subp():
     """
-    A fixture that mocks util._subp for all tests.
+    A fixture that mocks system._subp for all tests.
     If a test needs the actual _subp, this fixture yields it,
     so just add an argument to the test named "_subp".
     """
-    from uaclient.util import _subp
+    from uaclient.system import _subp
 
     original = _subp
     with mock.patch(
-        "uaclient.util._subp", return_value=("mockstdout", "mockstderr")
+        "uaclient.system._subp", return_value=("mockstdout", "mockstderr")
     ):
+        yield original
+
+
+@pytest.yield_fixture(scope="session", autouse=True)
+def _warn_about_new_version():
+    """
+    A fixture that mocks cli._warn_about_new_version for all tests.
+    If a test needs the actual _warn_about_new_version, this fixture yields it,
+    so just add an argument to the test named "_warn_about_new_version".
+    """
+    from uaclient.cli import _warn_about_new_version
+
+    original = _warn_about_new_version
+    with mock.patch("uaclient.cli._warn_about_new_version"):
         yield original
 
 
@@ -98,15 +116,24 @@ def logging_sandbox():
 @pytest.fixture
 def FakeConfig(tmpdir):
     class _FakeConfig(UAConfig):
-        def __init__(self, cfg_overrides={}, features_override=None) -> None:
-            cfg_overrides.update({"data_dir": tmpdir.strpath})
-            super().__init__(cfg_overrides)
+        def __init__(
+            self,
+            cfg_overrides={},
+            features_override=None,
+            root_mode: bool = True,
+        ) -> None:
+            if not cfg_overrides.get("data_dir"):
+                cfg_overrides.update({"data_dir": tmpdir.strpath})
+            super().__init__(cfg_overrides, root_mode=root_mode)
 
         @classmethod
         def for_attached_machine(
             cls,
             account_name: str = "test_account",
             machine_token: Dict[str, Any] = None,
+            status_cache: Dict[str, Any] = None,
+            effective_to: datetime.datetime = None,
+            root_mode: bool = True,
         ):
             if not machine_token:
                 machine_token = {
@@ -117,24 +144,66 @@ def FakeConfig(tmpdir):
                         "accountInfo": {
                             "id": "acct-1",
                             "name": account_name,
-                            "createdAt": "2019-06-14T06:45:50Z",
+                            "createdAt": datetime.datetime(
+                                2019,
+                                6,
+                                14,
+                                6,
+                                45,
+                                50,
+                                tzinfo=datetime.timezone.utc,
+                            ),
                             "externalAccountIDs": [
-                                {"IDs": ["id1"], "Origin": "AWS"}
+                                {"IDs": ["id1"], "origin": "AWS"}
                             ],
                         },
                         "contractInfo": {
                             "id": "cid",
                             "name": "test_contract",
-                            "createdAt": "2020-05-08T19:02:26Z",
-                            "effectiveFrom": "2000-05-08T19:02:26Z",
-                            "effectiveTo": "2040-05-08T19:02:26Z",
+                            "createdAt": datetime.datetime(
+                                2020,
+                                5,
+                                8,
+                                19,
+                                2,
+                                26,
+                                tzinfo=datetime.timezone.utc,
+                            ),
+                            "effectiveFrom": datetime.datetime(
+                                2000,
+                                5,
+                                8,
+                                19,
+                                2,
+                                26,
+                                tzinfo=datetime.timezone.utc,
+                            ),
+                            "effectiveTo": datetime.datetime(
+                                2040,
+                                5,
+                                8,
+                                19,
+                                2,
+                                26,
+                                tzinfo=datetime.timezone.utc,
+                            ),
                             "resourceEntitlements": [],
                             "products": ["free"],
                         },
                     },
                 }
-            config = cls()
-            config.write_cache("machine-token", machine_token)
+
+            if effective_to:
+                machine_token["machineTokenInfo"]["contractInfo"][
+                    "effectiveTo"
+                ] = effective_to
+
+            if not status_cache:
+                status_cache = {"attached": True}
+
+            config = cls(root_mode=root_mode)
+            config.machine_token_file._machine_token = machine_token
+            config.write_cache("status-cache", status_cache)
             return config
 
         def override_features(self, features_override):
@@ -150,3 +219,24 @@ def event():
     event.reset()
 
     return event
+
+
+class FakeNotice(NoticeFileDetails, Enum):
+    a = NoticeFileDetails("01", "a", True, "notice_a")
+    a2 = NoticeFileDetails("03", "a2", True, "notice_a2")
+    b = NoticeFileDetails("02", "b2", False, "notice_b")
+
+
+@pytest.yield_fixture(autouse=True)
+def mock_notices_dir(tmpdir_factory):
+    perm_dir = tmpdir_factory.mktemp("notices")
+    temp_dir = tmpdir_factory.mktemp("temp_notices")
+    with mock.patch(
+        "uaclient.defaults.NOTICES_PERMANENT_DIRECTORY",
+        perm_dir.strpath,
+    ):
+        with mock.patch(
+            "uaclient.defaults.NOTICES_TEMPORARY_DIRECTORY",
+            temp_dir.strpath,
+        ):
+            yield

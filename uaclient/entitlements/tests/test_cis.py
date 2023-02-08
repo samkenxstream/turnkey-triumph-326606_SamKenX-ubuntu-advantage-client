@@ -36,11 +36,11 @@ class TestCISEntitlementCanEnable:
 
 
 class TestCISEntitlementEnable:
-    @mock.patch("uaclient.apt.run_apt_cache_policy_command")
+    @mock.patch("uaclient.apt.get_apt_cache_policy")
     @mock.patch("uaclient.apt.setup_apt_proxy")
-    @mock.patch("uaclient.util.should_reboot")
-    @mock.patch("uaclient.util.subp")
-    @mock.patch("uaclient.util.get_platform_info")
+    @mock.patch("uaclient.system.should_reboot")
+    @mock.patch("uaclient.system.subp")
+    @mock.patch("uaclient.system.get_platform_info")
     def test_enable_configures_apt_sources_and_auth_files(
         self,
         m_platform_info,
@@ -49,6 +49,7 @@ class TestCISEntitlementEnable:
         m_setup_apt_proxy,
         m_apt_policy,
         capsys,
+        event,
         entitlement,
     ):
         """When entitled, configure apt repo auth token, pinning and url."""
@@ -64,9 +65,7 @@ class TestCISEntitlementEnable:
         m_apt_policy.return_value = "fakeout"
         m_should_reboot.return_value = False
 
-        with mock.patch(
-            M_REPOPATH + "os.path.exists", mock.Mock(return_value=True)
-        ):
+        with mock.patch(M_REPOPATH + "exists", mock.Mock(return_value=True)):
             with mock.patch("uaclient.apt.add_auth_apt_repo") as m_add_apt:
                 with mock.patch("uaclient.apt.add_ppa_pinning") as m_add_pin:
                     assert entitlement.enable()

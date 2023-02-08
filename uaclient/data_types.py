@@ -1,39 +1,48 @@
-from typing import Any, List, Optional, Type, TypeVar
+import datetime
+import json
+from enum import Enum
+from typing import Any, List, Optional, Type, TypeVar, Union
 
-from uaclient import exceptions
-
-INCORRECT_TYPE_ERROR_MESSAGE = (
-    "Expected value with type {type} but got value: {value}"
-)
-INCORRECT_LIST_ELEMENT_TYPE_ERROR_MESSAGE = (
-    "Got value with incorrect type at index {index}: {nested_msg}"
-)
-INCORRECT_FIELD_TYPE_ERROR_MESSAGE = (
-    'Got value with incorrect type for field "{key}": {nested_msg}'
-)
+from uaclient import exceptions, messages, util
 
 
 class IncorrectTypeError(exceptions.UserFacingError):
-    def __init__(self, expected_type: str, got_value: Any):
-        super().__init__(
-            INCORRECT_TYPE_ERROR_MESSAGE.format(
-                type=expected_type, value=repr(got_value)
-            )
+    def __init__(self, expected_type: str, got_type: str):
+        msg = messages.INCORRECT_TYPE_ERROR_MESSAGE.format(
+            expected_type=expected_type, got_type=got_type
         )
+        super().__init__(msg.msg, msg.name)
 
 
 class IncorrectListElementTypeError(IncorrectTypeError):
     def __init__(self, err: IncorrectTypeError, at_index: int):
-        self.msg = INCORRECT_LIST_ELEMENT_TYPE_ERROR_MESSAGE.format(
+        msg = messages.INCORRECT_LIST_ELEMENT_TYPE_ERROR_MESSAGE.format(
             index=at_index, nested_msg=err.msg
         )
+        self.msg = msg.msg
+        self.msg_code = msg.name
+        self.additional_info = None
 
 
 class IncorrectFieldTypeError(IncorrectTypeError):
     def __init__(self, err: IncorrectTypeError, key: str):
-        self.msg = INCORRECT_FIELD_TYPE_ERROR_MESSAGE.format(
+        msg = messages.INCORRECT_FIELD_TYPE_ERROR_MESSAGE.format(
             key=key, nested_msg=err.msg
         )
+        self.msg = msg.msg
+        self.msg_code = msg.name
+        self.additional_info = None
+        self.key = key
+
+
+class IncorrectEnumValueError(IncorrectTypeError):
+    def __init__(self, values: List[str], enum_class: Any):
+        msg = messages.INCORRECT_ENUM_VALUE_ERROR_MESSAGE.format(
+            values=values, enum_class=repr(enum_class)
+        )
+        self.msg = msg.msg
+        self.msg_code = msg.name
+        self.additional_info = None
 
 
 class DataValue:
@@ -48,6 +57,25 @@ class DataValue:
         return val
 
 
+E = TypeVar("E", bound="EnumDataValue")
+
+
+class EnumDataValue(DataValue, Enum):
+    """
+    To be used for parsing enum values
+    from_value raises an error if the value is not in the enum class values
+    and returns the value if found.
+    """
+
+    @classmethod
+    def from_value(cls: Type[E], val: Any) -> E:
+        try:
+            return cls(val)
+        except ValueError:
+            values = [i.value for i in cls]
+            raise IncorrectEnumValueError(values, cls)
+
+
 class StringDataValue(DataValue):
     """
     To be used for parsing string values
@@ -58,7 +86,7 @@ class StringDataValue(DataValue):
     @staticmethod
     def from_value(val: Any) -> str:
         if not isinstance(val, str):
-            raise IncorrectTypeError("string", val)
+            raise IncorrectTypeError("str", type(val).__name__)
         return val
 
 
@@ -72,7 +100,7 @@ class IntDataValue(DataValue):
     @staticmethod
     def from_value(val: Any) -> int:
         if not isinstance(val, int) or isinstance(val, bool):
-            raise IncorrectTypeError("int", val)
+            raise IncorrectTypeError("int", type(val).__name__)
         return val
 
 
@@ -86,7 +114,21 @@ class BoolDataValue(DataValue):
     @staticmethod
     def from_value(val: Any) -> bool:
         if not isinstance(val, bool):
-            raise IncorrectTypeError("bool", val)
+            raise IncorrectTypeError("bool", type(val).__name__)
+        return val
+
+
+class DatetimeDataValue(DataValue):
+    """
+    This expects that value is a datetime.
+    from_value raises an error if the value is not a datetime and returns
+    the datetime itself if it is a datetime.
+    """
+
+    @staticmethod
+    def from_value(val: Any) -> datetime.datetime:
+        if not isinstance(val, datetime.datetime):
+            raise IncorrectTypeError("datetime", type(val).__name__)
         return val
 
 
@@ -101,15 +143,33 @@ def data_list(data_cls: Type[DataValue]) -> Type[DataValue]:
         @staticmethod
         def from_value(val: Any) -> List:
             if not isinstance(val, list):
-                raise IncorrectTypeError("list", val)
+                raise IncorrectTypeError("list", type(val).__name__)
+            new_val = []
             for i, item in enumerate(val):
                 try:
-                    val[i] = data_cls.from_value(item)
+                    new_val.append(data_cls.from_value(item))
                 except IncorrectTypeError as e:
                     raise IncorrectListElementTypeError(e, i)
-            return val
+            return new_val
 
     return _DataList
+
+
+def data_list_to_list(
+    val: List[Union["DataObject", list, str, int, bool, Enum]],
+    keep_none: bool = True,
+) -> list:
+    new_val = []  # type: list
+    for item in val:
+        if isinstance(item, DataObject):
+            new_val.append(item.to_dict(keep_none))
+        elif isinstance(item, list):
+            new_val.append(data_list_to_list(item, keep_none))
+        elif isinstance(item, Enum):
+            new_val.append(item.value)
+        else:
+            new_val.append(item)
+    return new_val
 
 
 class Field:
@@ -151,6 +211,46 @@ class DataObject(DataValue):
     def __init__(self, **_kwargs):
         pass
 
+    def __eq__(self, other):
+        for field in self.fields:
+            self_val = getattr(self, field.key, None)
+            other_val = getattr(other, field.key, None)
+            if self_val != other_val:
+                return False
+        return True
+
+    def __repr__(self):
+        return "{}{}".format(
+            self.__class__.__name__, self.to_dict().__repr__()
+        )
+
+    def to_dict(self, keep_none: bool = True) -> dict:
+        d = {}
+        for field in self.fields:
+            val = getattr(self, field.key, None)
+            new_val = None  # type: Any
+
+            if isinstance(val, DataObject):
+                new_val = val.to_dict(keep_none)
+            elif isinstance(val, list):
+                new_val = data_list_to_list(val, keep_none)
+            elif isinstance(val, Enum):
+                new_val = val.value
+            else:
+                # simple type, just copy
+                new_val = val
+
+            if new_val is not None or keep_none:
+                d[field.key] = new_val
+        return d
+
+    def to_json(self, keep_null: bool = True) -> str:
+        return json.dumps(
+            self.to_dict(keep_none=keep_null),
+            sort_keys=True,
+            cls=util.DatetimeAwareJSONEncoder,
+        )
+
     @classmethod
     def from_dict(cls: Type[T], d: dict) -> T:
         kwargs = {}
@@ -160,7 +260,7 @@ class DataObject(DataValue):
             except KeyError:
                 if field.required:
                     raise IncorrectFieldTypeError(
-                        IncorrectTypeError(field.data_cls.__name__, None),
+                        IncorrectTypeError(field.data_cls.__name__, "null"),
                         field.key,
                     )
                 else:
@@ -176,14 +276,14 @@ class DataObject(DataValue):
     @classmethod
     def from_value(cls, val: Any):
         if not isinstance(val, dict):
-            raise IncorrectTypeError("dict", val)
+            raise IncorrectTypeError("dict", type(val).__name__)
         return cls.from_dict(val)
 
 
 class AttachActionsConfigFile(DataObject):
     """
     The format of the yaml file that can be passed with
-    ua attach --attach-config /path/to/file
+    pro attach --attach-config /path/to/file
     """
 
     fields = [

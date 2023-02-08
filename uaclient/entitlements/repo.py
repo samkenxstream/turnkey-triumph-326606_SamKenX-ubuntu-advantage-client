@@ -1,15 +1,21 @@
 import abc
 import copy
 import logging
-import os
 import re
-from typing import Any, Dict, List, Optional, Tuple, Union  # noqa: F401
+from os.path import exists
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from uaclient import apt, contract, event_logger, exceptions, messages, util
+from uaclient import (
+    apt,
+    contract,
+    event_logger,
+    exceptions,
+    messages,
+    system,
+    util,
+)
 from uaclient.entitlements import base
 from uaclient.entitlements.entitlement_status import ApplicationStatus
-
-APT_DISABLED_PIN = "-32768"
 
 event = event_logger.get_event_logger()
 
@@ -30,19 +36,14 @@ class RepoEntitlement(base.UAEntitlement):
     def repo_pin_priority(self) -> Union[int, str, None]:
         return None
 
-    # disable_apt_auth_only (ESM) to only remove apt auth files on disable
-    @property
-    def disable_apt_auth_only(self) -> bool:
-        return False  # Set True on ESM to only remove apt auth
-
     @property
     def packages(self) -> List[str]:
         """debs to install on enablement"""
         packages = []
 
-        entitlement = self.cfg.entitlements.get(self.name, {}).get(
-            "entitlement", {}
-        )
+        entitlement = self.cfg.machine_token_file.entitlements.get(
+            self.name, {}
+        ).get("entitlement", {})
 
         if entitlement:
             directives = entitlement.get("directives", {})
@@ -56,7 +57,9 @@ class RepoEntitlement(base.UAEntitlement):
 
     def _check_for_reboot(self) -> bool:
         """Check if system needs to be rebooted."""
-        reboot_required = util.should_reboot(installed_pkgs=set(self.packages))
+        reboot_required = system.should_reboot(
+            installed_pkgs=set(self.packages)
+        )
         event.needs_reboot(reboot_required)
         return reboot_required
 
@@ -73,10 +76,18 @@ class RepoEntitlement(base.UAEntitlement):
         """
         self.setup_apt_config(silent=silent)
 
-        self.install_packages()
-
-        event.info(messages.ENABLED_TMPL.format(title=self.title))
-        self._check_for_reboot_msg(operation="install")
+        if self.supports_access_only and self.access_only:
+            packages_str = (
+                ": " + " ".join(self.packages)
+                if len(self.packages) > 0
+                else ""
+            )
+            event.info("Skipping installing packages{}".format(packages_str))
+            event.info(messages.ACCESS_ENABLED_TMPL.format(title=self.title))
+        else:
+            self.install_packages()
+            event.info(messages.ENABLED_TMPL.format(title=self.title))
+            self._check_for_reboot_msg(operation="install")
         return True
 
     def _perform_disable(self, silent=False):
@@ -92,7 +103,9 @@ class RepoEntitlement(base.UAEntitlement):
     def application_status(
         self,
     ) -> Tuple[ApplicationStatus, Optional[messages.NamedMessage]]:
-        entitlement_cfg = self.cfg.entitlements.get(self.name, {})
+        entitlement_cfg = self.cfg.machine_token_file.entitlements.get(
+            self.name, {}
+        )
         directives = entitlement_cfg.get("entitlement", {}).get(
             "directives", {}
         )
@@ -102,14 +115,11 @@ class RepoEntitlement(base.UAEntitlement):
                 ApplicationStatus.DISABLED,
                 messages.NO_APT_URL_FOR_SERVICE.format(title=self.title),
             )
-        protocol, repo_path = repo_url.split("://")
-        policy = apt.run_apt_cache_policy_command(
+        policy = apt.get_apt_cache_policy(
             error_msg=messages.APT_POLICY_FAILED.msg
         )
-        match = re.search(
-            r"(?P<pin>(-)?\d+) {}/ubuntu".format(repo_url), policy
-        )
-        if match and match.group("pin") != APT_DISABLED_PIN:
+        match = re.search(r"{}/ubuntu".format(repo_url), policy)
+        if match:
             return (
                 ApplicationStatus.ENABLED,
                 messages.SERVICE_IS_ACTIVE.format(title=self.title),
@@ -132,7 +142,7 @@ class RepoEntitlement(base.UAEntitlement):
         # to regenerate the apt file, regardless of the apt url delta
         if all(
             line.startswith("#")
-            for line in util.load_file(apt_file).strip().split("\n")
+            for line in system.load_file(apt_file).strip().split("\n")
         ):
             return False
 
@@ -143,7 +153,7 @@ class RepoEntitlement(base.UAEntitlement):
 
         # If the delta is already in the file, we won't reconfigure it
         # again
-        return bool(apt_url in util.load_file(apt_file))
+        return bool(apt_url in system.load_file(apt_file))
 
     def process_contract_deltas(
         self,
@@ -208,7 +218,7 @@ class RepoEntitlement(base.UAEntitlement):
 
     def install_packages(
         self,
-        package_list: List[str] = None,
+        package_list: Optional[List[str]] = None,
         cleanup_on_failure: bool = True,
         verbose: bool = True,
     ) -> None:
@@ -296,7 +306,7 @@ class RepoEntitlement(base.UAEntitlement):
             http_proxy=http_proxy, https_proxy=https_proxy, proxy_scope=scope
         )
         repo_filename = self.repo_list_file_tmpl.format(name=self.name)
-        resource_cfg = self.cfg.entitlements.get(self.name)
+        resource_cfg = self.cfg.machine_token_file.entitlements.get(self.name)
         directives = resource_cfg["entitlement"].get("directives", {})
         obligations = resource_cfg["entitlement"].get("obligations", {})
         token = resource_cfg.get("resourceToken")
@@ -305,7 +315,7 @@ class RepoEntitlement(base.UAEntitlement):
             if not obligations.get("enableByDefault"):
                 # services that are not enableByDefault need to obtain specific
                 # resource access for tokens. We want to refresh this every
-                # enable call because it is not refreshed by `ua refresh`.
+                # enable call because it is not refreshed by `pro refresh`.
                 client = contract.UAContractClient(self.cfg)
                 machine_access = client.request_resource_machine_access(
                     machine_token, self.name
@@ -322,7 +332,7 @@ class RepoEntitlement(base.UAEntitlement):
         aptKey = directives.get("aptKey")
         if not aptKey:
             raise exceptions.UserFacingError(
-                "Ubuntu Advantage server provided no aptKey directive for"
+                "Ubuntu Pro server provided no aptKey directive for"
                 " {}.".format(self.name)
             )
         repo_url = directives.get("aptURL")
@@ -345,20 +355,17 @@ class RepoEntitlement(base.UAEntitlement):
                     )
                 )
             repo_pref_file = self.repo_pref_file_tmpl.format(name=self.name)
-            if self.repo_pin_priority != "never":
-                apt.add_ppa_pinning(
-                    repo_pref_file,
-                    repo_url,
-                    self.origin,
-                    self.repo_pin_priority,
-                )
-            elif os.path.exists(repo_pref_file):
-                os.unlink(repo_pref_file)  # Remove disabling apt pref file
+            apt.add_ppa_pinning(
+                repo_pref_file,
+                repo_url,
+                self.origin,
+                self.repo_pin_priority,
+            )
 
         prerequisite_pkgs = []
-        if not os.path.exists(apt.APT_METHOD_HTTPS_FILE):
+        if not exists(apt.APT_METHOD_HTTPS_FILE):
             prerequisite_pkgs.append("apt-transport-https")
-        if not os.path.exists(apt.CA_CERTIFICATES_FILE):
+        if not exists(apt.CA_CERTIFICATES_FILE):
             prerequisite_pkgs.append("ca-certificates")
 
         if prerequisite_pkgs:
@@ -379,7 +386,7 @@ class RepoEntitlement(base.UAEntitlement):
         # Run apt-update on any repo-entitlement enable because the machine
         # probably wants access to the repo that was just enabled.
         # Side-effect is that apt policy will now report the repo as accessible
-        # which allows ua status to report correct info
+        # which allows pro status to report correct info
         if not silent:
             event.info(messages.APT_UPDATING_LISTS)
         try:
@@ -396,36 +403,22 @@ class RepoEntitlement(base.UAEntitlement):
         :param run_apt_update: If after removing the apt update
             command after removing the apt files.
         """
-        series = util.get_platform_info()["series"]
+        series = system.get_platform_info()["series"]
         repo_filename = self.repo_list_file_tmpl.format(name=self.name)
-        entitlement = self.cfg.entitlements[self.name].get("entitlement", {})
+        entitlement = self.cfg.machine_token_file.entitlements[self.name].get(
+            "entitlement", {}
+        )
         access_directives = entitlement.get("directives", {})
         repo_url = access_directives.get("aptURL")
         if not repo_url:
             raise exceptions.MissingAptURLDirective(self.name)
-        if self.disable_apt_auth_only:
-            # We only remove the repo from the apt auth file, because
-            # UA Infra: ESM is a special-case: we want to be able to report on
-            # the available UA Infra: ESM updates even when it's disabled
-            apt.remove_repo_from_apt_auth_file(repo_url)
-            apt.restore_commented_apt_list_file(repo_filename)
-        else:
-            apt.remove_auth_apt_repo(
-                repo_filename, repo_url, self.repo_key_file
-            )
-            apt.remove_apt_list_files(repo_url, series)
+
+        apt.remove_auth_apt_repo(repo_filename, repo_url, self.repo_key_file)
+        apt.remove_apt_list_files(repo_url, series)
+
         if self.repo_pin_priority:
             repo_pref_file = self.repo_pref_file_tmpl.format(name=self.name)
-            if self.repo_pin_priority == "never":
-                # Disable the repo with a pinning file
-                apt.add_ppa_pinning(
-                    repo_pref_file,
-                    repo_url,
-                    self.origin,
-                    self.repo_pin_priority,
-                )
-            elif os.path.exists(repo_pref_file):
-                os.unlink(repo_pref_file)
+            system.ensure_file_absent(repo_pref_file)
 
         if run_apt_update:
             if not silent:

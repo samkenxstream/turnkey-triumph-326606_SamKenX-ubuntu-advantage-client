@@ -12,6 +12,20 @@ class NamedMessage:
         # useful if the message represents an error.
         self.additional_info = None  # type: Optional[Dict[str, str]]
 
+    def __eq__(self, other):
+        return (
+            self.msg == other.msg
+            and self.name == other.name
+            and self.additional_info == other.additional_info
+        )
+
+    def __repr__(self):
+        return "NamedMessage({}, {}, {})".format(
+            self.name.__repr__(),
+            self.msg.__repr__(),
+            self.additional_info.__repr__(),
+        )
+
 
 class FormattedNamedMessage(NamedMessage):
     def __init__(self, name: str, msg: str):
@@ -27,6 +41,8 @@ class FormattedNamedMessage(NamedMessage):
 class TxtColor:
     OKGREEN = "\033[92m"
     DISABLEGREY = "\033[37m"
+    INFOBLUE = "\033[94m"
+    WARNINGYELLOW = "\033[93m"
     FAIL = "\033[91m"
     BOLD = "\033[1m"
     ENDC = "\033[0m"
@@ -34,6 +50,7 @@ class TxtColor:
 
 OKGREEN_CHECK = TxtColor.OKGREEN + "✔" + TxtColor.ENDC
 FAIL_X = TxtColor.FAIL + "✘" + TxtColor.ENDC
+BLUE_INFO = TxtColor.INFOBLUE + "[info]" + TxtColor.ENDC
 
 ERROR_INVALID_CONFIG_VALUE = """\
 Invalid value for {path_to_value} in /etc/ubuntu-advantage/uaclient.conf. \
@@ -73,15 +90,46 @@ SECURITY_AFFECTED_PKGS = (
 )
 USN_FIXED = "{issue} is addressed."
 CVE_FIXED = "{issue} is resolved."
+CVE_FIXED_BY_LIVEPATCH = (
+    OKGREEN_CHECK
+    + " {issue} is resolved by livepatch patch version: {version}."
+)
 SECURITY_URL = "{issue}: {title}\nhttps://ubuntu.com/security/{url_path}"
+SECURITY_DRY_RUN_UA_SERVICE_NOT_ENABLED = """\
+{bold}Ubuntu Pro service: {{service}} is not enabled.
+To proceed with the fix, a prompt would ask permission to automatically enable
+this service.
+{{{{ pro enable {{service}} }}}}{end_bold}""".format(
+    bold=TxtColor.BOLD, end_bold=TxtColor.ENDC
+)
+SECURITY_DRY_RUN_UA_NOT_ATTACHED = """\
+{bold}The machine is not attached to an Ubuntu Pro subscription.
+To proceed with the fix, a prompt would ask for a valid Ubuntu Pro token.
+{{ pro attach TOKEN }}{end_bold}""".format(
+    bold=TxtColor.BOLD, end_bold=TxtColor.ENDC
+)
+SECURITY_DRY_RUN_UA_EXPIRED_SUBSCRIPTION = """\
+{bold}The machine has an expired subscription.
+To proceed with the fix, a prompt would ask for a new Ubuntu Pro
+token to renew the subscription.
+{{ pro detach --assume-yes }}
+{{ pro attach NEW_TOKEN }}{end_bold}""".format(
+    bold=TxtColor.BOLD, end_bold=TxtColor.ENDC
+)
+SECURITY_DRY_RUN_WARNING = """\
+{bold}WARNING: The option --dry-run is being used.
+No packages will be installed when running this command.{end_bold}""".format(
+    bold=TxtColor.BOLD, end_bold=TxtColor.ENDC
+)
 SECURITY_UA_SERVICE_NOT_ENABLED = """\
-Error: UA service: {service} is not enabled.
+Error: Ubuntu Pro service: {service} is not enabled.
 Without it, we cannot fix the system."""
 SECURITY_UA_SERVICE_NOT_ENTITLED = """\
-Error: The current UA subscription is not entitled to: {service}.
+Error: The current Ubuntu Pro subscription is not entitled to: {service}.
 Without it, we cannot fix the system."""
 APT_UPDATING_LISTS = "Updating package lists"
 DISABLE_FAILED_TMPL = "Could not disable {title}."
+ACCESS_ENABLED_TMPL = "{title} access enabled"
 ENABLED_TMPL = "{title} enabled"
 UNABLE_TO_DETERMINE_CLOUD_TYPE = (
     """\
@@ -102,7 +150,7 @@ Auto-attach image support is not available on this image
 See: """
     + BASE_UA_URL
 )
-NO_ACTIVE_OPERATIONS = """No Ubuntu Advantage operations are running"""
+NO_ACTIVE_OPERATIONS = """No Ubuntu Pro operations are running"""
 REBOOT_SCRIPT_FAILED = (
     "Failed running reboot_cmds script. See: /var/log/ubuntu-advantage.log"
 )
@@ -116,7 +164,7 @@ SNAPD_DOES_NOT_HAVE_WAIT_CMD = (
     "Please, upgrade snapd if Livepatch enable fails and try again."
 )
 FIPS_INSTALL_OUT_OF_DATE = (
-    "This FIPS install is out of date, run: sudo ua enable fips"
+    "This FIPS install is out of date, run: sudo pro enable fips"
 )
 FIPS_DISABLE_REBOOT_REQUIRED = (
     "Disabling FIPS requires system reboot to complete operation."
@@ -137,19 +185,21 @@ ENABLE_BY_DEFAULT_TMPL = "Enabling default service {name}"
 ENABLE_REBOOT_REQUIRED_TMPL = """\
 A reboot is required to complete {operation}."""
 ENABLE_BY_DEFAULT_MANUAL_TMPL = """\
-Service {name} is recommended by default. Run: sudo ua enable {name}"""
+Service {name} is recommended by default. Run: sudo pro enable {name}"""
 DETACH_SUCCESS = "This machine is now detached."
 DETACH_AUTOMATION_FAILURE = "Unable to automatically detach machine"
 
 REFRESH_CONTRACT_ENABLE = "One moment, checking your subscription first"
 REFRESH_CONTRACT_SUCCESS = "Successfully refreshed your subscription."
 REFRESH_CONTRACT_FAILURE = "Unable to refresh your subscription"
-REFRESH_CONFIG_SUCCESS = "Successfully processed your ua configuration."
+REFRESH_CONFIG_SUCCESS = "Successfully processed your pro configuration."
 REFRESH_CONFIG_FAILURE = "Unable to process uaclient.conf"
 REFRESH_MESSAGES_SUCCESS = (
-    "Successfully updated UA related APT and MOTD messages."
+    "Successfully updated Ubuntu Pro related APT and MOTD messages."
 )
-REFRESH_MESSAGES_FAILURE = "Unable to update UA related APT and MOTD messages."
+REFRESH_MESSAGES_FAILURE = (
+    "Unable to update Ubuntu Pro related APT and MOTD messages."
+)
 
 UPDATE_CHECK_CONTRACT_FAILURE = (
     """Failed to check for change in machine contract. Reason: {reason}"""
@@ -180,88 +230,83 @@ SECURITY_APT_NON_ROOT = """\
 Package fixes cannot be installed.
 To install them, run this command as root (try using sudo)"""
 
-# MOTD and APT command messaging
-ANNOUNCE_ESM_TMPL = """\
- * Introducing Extended Security Maintenance for Applications.
-   Receive updates to over 30,000 software packages with your
-   Ubuntu Advantage subscription. Free for personal use.
+# BEGIN MOTD and APT command messaging
+
+ANNOUNCE_ESM_APPS_TMPL = """\
+ * Introducing Expanded Security Maintenance for Applications.
+   Receive updates to over 25,000 software packages with your
+   Ubuntu Pro subscription. Free for personal use.
 
      {url}
 """
 
-CONTRACT_EXPIRED_SOON_TMPL = """\
-CAUTION: Your {title} service will expire in {remaining_days} days.
-Renew UA subscription at {url} to ensure
-continued security coverage for your applications.
+CONTRACT_EXPIRED_MOTD_SOON_TMPL = """\
+CAUTION: Your Ubuntu Pro subscription will expire in {remaining_days} days.
+Renew your subscription at https://ubuntu.com/pro to ensure continued security
+coverage for your applications.
 """
 
-CONTRACT_EXPIRED_GRACE_PERIOD_TMPL = """\
-CAUTION: Your {title} service expired on {expired_date}.
-Renew UA subscription at {url} to ensure
-continued security coverage for your applications.
+CONTRACT_EXPIRED_MOTD_GRACE_PERIOD_TMPL = """\
+CAUTION: Your Ubuntu Pro subscription expired on {expired_date}.
+Renew your subscription at https://ubuntu.com/pro to ensure continued security
+coverage for your applications.
 Your grace period will expire in {remaining_days} days.
 """
 
 CONTRACT_EXPIRED_MOTD_PKGS_TMPL = """\
-*Your {title} subscription has EXPIRED*
+*Your Ubuntu Pro subscription has EXPIRED*
+{pkg_num} additional security update(s) require Ubuntu Pro with '{service}' enabled.
+Renew your service at https://ubuntu.com/pro
+"""  # noqa: E501
 
-{pkg_num} additional security update(s) could have been applied via {title}.
-
-Renew your UA services at {url}
+CONTRACT_EXPIRED_MOTD_NO_PKGS_TMPL = """\
+*Your Ubuntu Pro subscription has EXPIRED*
+Renew your service at https://ubuntu.com/pro
 """
 
-CONTRACT_EXPIRED_APT_PKGS_TMPL = """\
-*Your {title} subscription has EXPIRED*
-Enabling {title} service would provide security updates for following packages:
-  {pkg_names}
-{pkg_num} {name} security update(s) NOT APPLIED. Renew your UA services at
-{url}
+CONTRACT_EXPIRES_SOON_APT_NEWS = """\
+#
+# CAUTION: Your Ubuntu Pro subscription will expire in {remaining_days} days.
+# Renew your subscription at https://ubuntu.com/pro to ensure continued
+# security coverage for your applications.
+#
+"""
+CONTRACT_EXPIRED_GRACE_PERIOD_APT_NEWS = """\
+#
+# CAUTION: Your Ubuntu Pro subscription expired on {expired_date}.
+# Renew your subscription at https://ubuntu.com/pro to ensure continued
+# security coverage for your applications.
+# Your grace period will expire in {remaining_days} days.
+#
+"""
+CONTRACT_EXPIRED_APT_NEWS = """\
+#
+# *Your Ubuntu Pro subscription has EXPIRED*
+# Renew your service at https://ubuntu.com/pro
+#
 """
 
-DISABLED_MOTD_NO_PKGS_TMPL = """\
-Enable {title} to receive additional future security updates.
-See {url} or run: sudo ua status
-"""
-
-CONTRACT_EXPIRED_APT_NO_PKGS_TMPL = (
-    """\
-*Your {title} subscription has EXPIRED*
-"""
-    + DISABLED_MOTD_NO_PKGS_TMPL
-)
-
-
-DISABLED_APT_PKGS_TMPL = """\
-*The following packages could receive security updates \
-with {title} service enabled:
-  {pkg_names}
-Learn more about {title} service {eol_release}at {url}
-"""
-
-UBUNTU_NO_WARRANTY = """\
-Ubuntu comes with ABSOLUTELY NO WARRANTY, to the extent permitted by
-applicable law.
-"""
+# END MOTD and APT command messaging
 
 APT_PROXY_CONFIG_HEADER = """\
 /*
  * Autogenerated by ubuntu-advantage-tools
  * Do not edit this file directly
  *
- * To change what ubuntu-advantage-tools sets, use the `ua config set`
- * or the `ua config unset` commands to set/unset either:
+ * To change what ubuntu-advantage-tools sets, use the `pro config set`
+ * or the `pro config unset` commands to set/unset either:
  *      global_apt_http_proxy and global_apt_https_proxy
  * for a global apt proxy
  * or
  *      ua_apt_http_proxy and ua_apt_https_proxy
- * for an apt proxy that only applies to UA related repos.
+ * for an apt proxy that only applies to Ubuntu Pro related repos.
  */
 """
 
 UACLIENT_CONF_HEADER = """\
-# Ubuntu-Advantage client config file.
-# If you modify this file, run "ua refresh config" to ensure changes are
-# picked up by Ubuntu-Advantage client.
+# Ubuntu Pro client config file.
+# If you modify this file, run "pro refresh config" to ensure changes are
+# picked up by Ubuntu Pro client.
 
 """
 
@@ -272,7 +317,7 @@ ERROR_USING_PROXY = (
 
 PROXY_DETECTED_BUT_NOT_CONFIGURED = """\
 No proxy set in config; however, proxy is configured for: {{services}}.
-See {docs_url} for more information on ua proxy configuration.
+See {docs_url} for more information on pro proxy configuration.
 """.format(
     docs_url=DOCUMENTATION_URL
 )
@@ -289,7 +334,7 @@ For help see: """
 UNATTACHED = NamedMessage(
     "unattached",
     """\
-This machine is not attached to a UA subscription.
+This machine is not attached to an Ubuntu Pro subscription.
 See """
     + BASE_UA_URL,
 )
@@ -297,7 +342,7 @@ See """
 VALID_SERVICE_FAILURE_UNATTACHED = FormattedNamedMessage(
     "valid-service-failure-unattached",
     """\
-To use '{valid_service}' you need an Ubuntu Advantage subscription
+To use '{valid_service}' you need an Ubuntu Pro subscription
 Personal and community subscriptions are available at no charge
 See """
     + BASE_UA_URL,
@@ -368,13 +413,13 @@ NO_APT_URL_FOR_SERVICE = FormattedNamedMessage(
 ALREADY_DISABLED = FormattedNamedMessage(
     "service-already-disabled",
     """\
-{title} is not currently enabled\nSee: sudo ua status""",
+{title} is not currently enabled\nSee: sudo pro status""",
 )
 
 ALREADY_ENABLED = FormattedNamedMessage(
     "service-already-enabled",
     """\
-{title} is already enabled.\nSee: sudo ua status""",
+{title} is already enabled.\nSee: sudo pro status""",
 )
 
 ENABLED_FAILED = FormattedNamedMessage(
@@ -440,6 +485,36 @@ Invalid token. See """
     + BASE_UA_URL,
 )
 
+MAGIC_ATTACH_TOKEN_ALREADY_ACTIVATED = NamedMessage(
+    "magic-attach-token-already-activated",
+    "The magic attach token is already activated.",
+)
+
+MAGIC_ATTACH_EXPIRED_TOKEN = NamedMessage(
+    "magic-attach-token-expired",
+    "The magic attach token has expired or never existed.",
+)
+
+MAGIC_ATTACH_TOKEN_ERROR = NamedMessage(
+    "magic-attach-token-error",
+    "The magic attach token is invalid, has expired or never existed",
+)
+
+MAGIC_ATTACH_INVALID_EMAIL = FormattedNamedMessage(
+    "magic-attach-invalid-email",
+    "{email} is not a valid email.",
+)
+
+MAGIC_ATTACH_UNAVAILABLE = NamedMessage(
+    "magic-attach-service-unavailable",
+    "Service unavailable, please try again later.",
+)
+
+MAGIC_ATTACH_INVALID_PARAM = FormattedNamedMessage(
+    "magic-attach-invalid-param",
+    "This attach flow does not support {param} with value: {value}",
+)
+
 REQUIRED_SERVICE_NOT_FOUND = FormattedNamedMessage(
     "required-service-not-found", "Required service {service} not found."
 )
@@ -453,7 +528,7 @@ APT_UPDATE_INVALID_REPO = FormattedNamedMessage(
     "apt-update-invalid-repo", "APT update failed.\n{repo_msg}"
 )
 
-APT_INSTALL_FAILED = NamedMessage("apt-install-failes", "APT install failed.")
+APT_INSTALL_FAILED = NamedMessage("apt-install-failed", "APT install failed.")
 
 APT_UPDATE_INVALID_URL_CONFIG = FormattedNamedMessage(
     "apt-update-invalid-url-config",
@@ -491,6 +566,10 @@ SNAPD_NOT_PROPERLY_INSTALLED = FormattedNamedMessage(
     ),
 )
 
+CANNOT_INSTALL_SNAPD = NamedMessage(
+    "cannot-install-snapd", "Failed to install snapd on the system"
+)
+
 SSL_VERIFICATION_ERROR_CA_CERTIFICATES = FormattedNamedMessage(
     "ssl-verification-error-ca-certificate",
     """\
@@ -510,21 +589,15 @@ Please check your openssl configuration.""",
 MISSING_APT_URL_DIRECTIVE = FormattedNamedMessage(
     "missing-apt-url-directive",
     """\
-Ubuntu Advantage server provided no aptURL directive for {entitlement_name}""",
+Ubuntu Pro server provided no aptURL directive for {entitlement_name}""",
 )
 
 ALREADY_ATTACHED = FormattedNamedMessage(
     name="already-attached",
     msg=(
         "This machine is already attached to '{account_name}'\n"
-        "To use a different subscription first run: sudo ua detach."
+        "To use a different subscription first run: sudo pro detach."
     ),
-)
-
-ALREADY_ATTACHED_ON_PRO = FormattedNamedMessage(
-    "already-attached-on-pro",
-    """\
-Skipping attach: Instance '{instance_id}' is already attached.""",
 )
 
 CONNECTIVITY_ERROR = NamedMessage(
@@ -592,7 +665,7 @@ Include the token in the attach-config file instead.
 ATTACH_REQUIRES_TOKEN = NamedMessage(
     "attach-requires-token",
     """\
-Attach requires a token: sudo ua attach <TOKEN>
+Attach requires a token: sudo pro attach <TOKEN>
 To obtain a token please visit: """
     + BASE_UA_URL
     + ".",
@@ -608,7 +681,7 @@ Failed to attach machine. See """
 ATTACH_FAILURE_DEFAULT_SERVICES = NamedMessage(
     "attach-failure-default-service",
     """\
-Failed to enable default services, check: sudo ua status""",
+Failed to enable default services, check: sudo pro status""",
 )
 
 INVALID_CONTRACT_DELTAS_SERVICE_TYPE = FormattedNamedMessage(
@@ -714,33 +787,32 @@ REALTIME_FIPS_UPDATES_INCOMPATIBLE = NamedMessage(
 )
 REALTIME_LIVEPATCH_INCOMPATIBLE = NamedMessage(
     "realtime-livepatch-incompatible",
-    "Livepatch is not currently supported for the real-time kernel.",
+    "Livepatch is not currently supported for the Real-time kernel.",
 )
 REALTIME_BETA_FLAG_REQUIRED = NamedMessage(
     "beta-flag-required",
-    "Use `ua enable realtime-kernel --beta` to acknowledge the real-time"
+    "Use `pro enable realtime-kernel --beta` to acknowledge the real-time"
     " kernel is currently in beta and comes with no support.",
 )
-REALTIME_BETA_PROMPT = """\
-The real-time kernel is a beta version of the 22.04 Ubuntu kernel with the
-PREEMPT_RT patchset integrated for x86_64 and ARM64.
+REALTIME_PROMPT = """\
+The Real-time kernel is an Ubuntu kernel with PREEMPT_RT patches integrated.
 
 {bold}\
-This will change your kernel. You will need to manually configure grub to
-revert back to your original kernel after enabling real-time.\
+This will change your kernel. To revert to your original kernel, you will need
+to make the change manually.\
 {end_bold}
 
 Do you want to continue? [ default = Yes ]: (Y/n) """.format(
     bold=TxtColor.BOLD, end_bold=TxtColor.ENDC
 )
 REALTIME_PRE_DISABLE_PROMPT = """\
-This will disable the Real-Time Kernel entitlement but the Real-Time Kernel\
- will remain installed.
+This will disable Ubuntu Pro updates to the Real-time kernel on this machine.
+The Real-time kernel will remain installed.\
 Are you sure? (y/N) """
 
 REALTIME_ERROR_INSTALL_ON_CONTAINER = NamedMessage(
     "realtime-error-install-on-container",
-    "Cannot install Real-Time Kernel on a container.",
+    "Cannot install Real-time kernel on a container.",
 )
 
 GCP_SERVICE_ACCT_NOT_ENABLED_ERROR = NamedMessage(
@@ -761,7 +833,7 @@ WARNING_APT_PROXY_SETUP = """\
 Warning: apt_{protocol_type}_proxy has been renamed to global_apt_{protocol_type}_proxy."""  # noqa: E501
 WARNING_APT_PROXY_OVERWRITE = """\
 Warning: Setting the {current_proxy} proxy will overwrite the {previous_proxy}
-proxy previously set via `ua config`.
+proxy previously set via `pro config`.
 """
 WARNING_DEPRECATED_APT_HTTP = """\
 Using deprecated "apt_http_proxy" config field.
@@ -773,7 +845,7 @@ Please migrate to using "global_apt_https_proxy"
 """
 
 ERROR_PROXY_CONFIGURATION = """\
-Error: Setting global apt proxy and ua scoped apt proxy
+Error: Setting global apt proxy and pro scoped apt proxy
 at the same time is unsupported.
 Cancelling config process operation.
 """
@@ -790,20 +862,10 @@ NOTICE_WRONG_FIPS_METAPACKAGE_ON_CLOUD = """\
 Warning: FIPS kernel is not optimized for your specific cloud.
 To fix it, run the following commands:
 
-    1. sudo ua disable fips
+    1. sudo pro disable fips
     2. sudo apt-get remove ubuntu-fips
-    3. sudo ua enable fips --assume-yes
+    3. sudo pro enable fips --assume-yes
     4. sudo reboot
-"""
-NOTICE_DAEMON_AUTO_ATTACH_LOCK_HELD = """\
-Detected an Ubuntu Pro license but failed to auto attach because
-"{operation}" was in progress.
-Please run `ua auto-attach` to upgrade to Pro.
-"""
-NOTICE_DAEMON_AUTO_ATTACH_FAILED = """\
-Detected an Ubuntu Pro license but failed to auto attach.
-Please run `ua auto-attach` to upgrade to Pro.
-If that fails then please contact support.
 """
 
 PROMPT_YES_NO = """Are you sure? (y/N) """
@@ -844,12 +906,228 @@ Enter your token (from {}) to attach this system:""".format(
     BASE_UA_URL
 )
 PROMPT_EXPIRED_ENTER_TOKEN = """\
-Enter your new token to renew UA subscription on this system:"""
+Enter your new token to renew Ubuntu Pro subscription on this system:"""
 PROMPT_UA_SUBSCRIPTION_URL = """\
-Open a browser to: {}/subscribe""".format(
+Open a browser to: {}""".format(
     BASE_UA_URL
 )
 
 NOTICE_REFRESH_CONTRACT_WARNING = """\
 A change has been detected in your contract.
-Please run `sudo ua refresh`."""
+Please run `sudo pro refresh`."""
+
+API_BAD_ARGS_FORMAT = FormattedNamedMessage(
+    name="api-args-wrong-format", msg="'{arg}' is not formatted as 'key=value'"
+)
+API_INVALID_ENDPOINT = FormattedNamedMessage(
+    name="api-invalid-endpoint", msg="'{endpoint}' is not a valid endpoint"
+)
+API_UNKNOWN_ARG = FormattedNamedMessage(
+    name="api-unknown-argument", msg="Ignoring unknown argument '{arg}'"
+)
+API_MISSING_ARG = FormattedNamedMessage(
+    name="api-missing-argument",
+    msg="Missing argument '{arg}' for endpoint {endpoint}",
+)
+API_NO_ARG_FOR_ENDPOINT = FormattedNamedMessage(
+    name="api-no-argument-for-endpoint", msg="{endpoint} accepts no arguments"
+)
+
+INVALID_FILE_FORMAT = FormattedNamedMessage(
+    name="invalid-file-format", msg="{file_name} is not valid {file_format}"
+)
+
+KERNEL_PARSE_ERROR = "Failed to parse kernel: {kernel}"
+
+LSCPU_ARCH_PARSE_ERROR = NamedMessage(
+    name="lscpu-arch-parse-error",
+    msg="Failed to parse architecture from output of lscpu",
+)
+
+WARN_NEW_VERSION_AVAILABLE = FormattedNamedMessage(
+    name="new-version-available",
+    msg="A new version of the client is available: {version}. \
+Please upgrade to the latest version to get the new features \
+and bug fixes.",
+)
+
+INVALID_PRO_IMAGE = FormattedNamedMessage(
+    name="invalid-pro-image", msg="Error on Pro Image:\n{msg}"
+)
+
+ENABLE_ACCESS_ONLY_NOT_SUPPORTED = FormattedNamedMessage(
+    name="enable-access-only-not-supported",
+    msg="{title} does not support being enabled with --access-only",
+)
+
+MISSING_DISTRO_INFO_FILE = "Can't load the distro-info database."
+MISSING_SERIES_IN_DISTRO_INFO_FILE = (
+    "Can't find series {} in the distro-info database."
+)
+NO_EOL_DATA_FOR_SERIES = "Unable to get {} dates for series {}"
+
+# Security Status output
+
+SS_SUMMARY_TOTAL = "{count} packages installed:"
+SS_SUMMARY_ARCHIVE = (
+    "{offset}{count} package{plural} from Ubuntu {repository} repository"
+)
+SS_SUMMARY_THIRD_PARTY_SN = "{offset}{count} package from a third party"
+SS_SUMMARY_THIRD_PARTY_PL = "{offset}{count} packages from third parties"
+SS_SUMMARY_UNAVAILABLE = (
+    "{offset}{count} package{plural} no longer available for download"
+)
+
+SS_HELP_CALL = """\
+To get more information about the packages, run
+    pro security-status --help
+for a list of available options."""
+
+SS_INTERIM_SUPPORT = "Main/Restricted packages receive updates until {date}."
+SS_LTS_SUPPORT = """\
+This machine is receiving security patching for Ubuntu Main/Restricted
+repository until {date}."""
+
+SS_IS_ATTACHED = (
+    "This machine is{not_attached} attached to an Ubuntu Pro subscription."
+)
+
+SS_THIRD_PARTY = """\
+Packages from third parties are not provided by the official Ubuntu
+archive, for example packages from Personal Package Archives in Launchpad."""
+SS_UNAVAILABLE = """\
+Packages that are not available for download may be left over from a
+previous release of Ubuntu, may have been installed directly from a
+.deb file, or are from a source which has been disabled."""
+
+SS_NO_SECURITY_COVERAGE = """\
+This machine is NOT receiving security patches because the LTS period has ended
+and esm-infra is not enabled."""
+
+SS_SERVICE_ADVERTISE = """\
+Ubuntu Pro with '{service}' enabled provides security updates for
+{repository} packages until {year}"""
+SS_SERVICE_ADVERTISE_COUNTS = (
+    " and has {updates} pending security update{plural}."
+)
+
+SS_SERVICE_ENABLED = """\
+{repository} packages are receiving security updates from
+Ubuntu Pro with '{service}' enabled until {year}."""
+SS_SERVICE_ENABLED_COUNTS = """\
+ You have received {updates} security
+update{plural}."""
+
+SS_SERVICE_COMMAND = "Enable {service} with: pro enable {service}"
+SS_LEARN_MORE = """\
+Try Ubuntu Pro with a free personal subscription on up to 5 machines.
+Learn more at {url}
+""".format(
+    url=BASE_UA_URL
+)
+
+SS_POLICY_HINT = """\
+For example, run:
+    apt-cache policy {package}
+to learn more about that package."""
+
+SS_NO_THIRD_PARTY = "You have no packages installed from a third party."
+SS_NO_UNAVAILABLE = (
+    "You have no packages installed that are no longer available."
+)
+SS_NO_INTERIM_PRO_SUPPORT = "Ubuntu Pro is not available for non-LTS releases."
+
+SS_SERVICE_HELP = "Run 'pro help {service}' to learn more"
+SS_BOLD_PACKAGES = """\
+Package names in {bold}bold{end_bold} currently have an available update
+with '{{service}}' enabled""".format(
+    bold=TxtColor.BOLD, end_bold=TxtColor.ENDC
+)
+
+ENTITLEMENT_NOT_FOUND = FormattedNamedMessage(
+    "entitlement-not-found",
+    'could not find entitlement named "{name}"',
+)
+
+TRY_UBUNTU_PRO_BETA = """\
+Try Ubuntu Pro beta with a free personal subscription on up to 5 machines.
+Learn more at https://ubuntu.com/pro"""
+
+INVALID_STATE_FILE = "Invalid state file: {}"
+
+ENTITLEMENTS_NOT_ENABLED_ERROR = NamedMessage(
+    "entitlements-not-enabled",
+    "failed to enable some services",
+)
+
+AUTO_ATTACH_DISABLED_ERROR = NamedMessage(
+    "auto-attach-disabled",
+    "features.disable_auto_attach set in config",
+)
+
+AUTO_ATTACH_RUNNING = (
+    "Currently attempting to automatically attach this machine to "
+    "Ubuntu Pro services"
+)
+
+# prefix used for removing notices
+AUTO_ATTACH_RETRY_NOTICE_PREFIX = """\
+Failed to automatically attach to Ubuntu Pro services"""
+AUTO_ATTACH_RETRY_NOTICE = (
+    AUTO_ATTACH_RETRY_NOTICE_PREFIX
+    + """\
+ {num_attempts} time(s).
+The failure was due to: {reason}.
+The next attempt is scheduled for {next_run_datestring}.
+You can try manually with `sudo pro auto-attach`."""
+)
+
+AUTO_ATTACH_RETRY_TOTAL_FAILURE_NOTICE = (
+    AUTO_ATTACH_RETRY_NOTICE_PREFIX
+    + """\
+ {num_attempts} times.
+The most recent failure was due to: {reason}.
+Try re-launching the instance or report this issue by running `ubuntu-bug ubuntu-advantage-tools`
+You can try manually with `sudo pro auto-attach`."""  # noqa: E501
+)
+
+RETRY_ERROR_DETAIL_INVALID_PRO_IMAGE = (
+    'Canonical servers did not recognize this machine as Ubuntu Pro: "{}"'
+)
+RETRY_ERROR_DETAIL_NON_AUTO_ATTACH_IMAGE = (
+    "Canonical servers did not recognize this image as Ubuntu Pro"
+)
+RETRY_ERROR_DETAIL_LOCK_HELD = "the pro lock was held by pid {pid}"
+RETRY_ERROR_DETAIL_CONTRACT_API_ERROR = 'an error from Canonical servers: "{}"'
+RETRY_ERROR_DETAIL_CONNECTIVITY_ERROR = "a connectivity error"
+RETRY_ERROR_DETAIL_URL_ERROR_CODE = "a {code} while reaching {url}"
+RETRY_ERROR_DETAIL_URL_ERROR_URL = "an error while reaching {url}"
+RETRY_ERROR_DETAIL_URL_ERROR_GENERIC = "a network error"
+RETRY_ERROR_DETAIL_UNKNOWN = "an unknown error"
+
+INCORRECT_TYPE_ERROR_MESSAGE = FormattedNamedMessage(
+    "incorrect-type",
+    "Expected value with type {expected_type} but got type: {got_type}",
+)
+INCORRECT_LIST_ELEMENT_TYPE_ERROR_MESSAGE = FormattedNamedMessage(
+    "incorrect-list-element-type",
+    "Got value with incorrect type at index {index}: {nested_msg}",
+)
+INCORRECT_FIELD_TYPE_ERROR_MESSAGE = FormattedNamedMessage(
+    "incorrect-field-type",
+    'Got value with incorrect type for field "{key}": {nested_msg}',
+)
+INCORRECT_ENUM_VALUE_ERROR_MESSAGE = FormattedNamedMessage(
+    "incorrect-enum-value",
+    "Value provided was not found in {enum_class}'s allowed: value: {values}",
+)
+
+LIVEPATCH_KERNEL_NOT_SUPPORTED = FormattedNamedMessage(
+    name="livepatch-kernel-not-supported",
+    msg="""\
+The current kernel ({version}, {arch}) is not supported by livepatch.
+Supported kernels are listed here: https://ubuntu.com/security/livepatch/docs/kernels
+Either switch to a supported kernel or `pro disable livepatch` to dismiss this warning.""",  # noqa: E501
+)
+LIVEPATCH_KERNEL_NOT_SUPPORTED_DESCRIPTION = "Current kernel is not supported"
+LIVEPATCH_KERNEL_NOT_SUPPORTED_UNATTACHED = "Supported livepatch kernels are listed here: https://ubuntu.com/security/livepatch/docs/kernels"  # noqa: E501

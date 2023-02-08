@@ -6,16 +6,16 @@ from uaclient.entitlements.entitlement_status import ApplicationStatus
 from uaclient.exceptions import NonRootUserError
 
 HELP_OUTPUT = """\
-usage: ua unset <key> [flags]
+usage: pro unset <key> [flags]
 
-Unset Ubuntu Advantage configuration setting
+Unset Ubuntu Pro configuration setting
 
 positional arguments:
-  key         configuration key to unset from Ubuntu Advantage services. One
-              of: http_proxy, https_proxy, apt_http_proxy, apt_https_proxy,
+  key         configuration key to unset from Ubuntu Pro services. One of:
+              http_proxy, https_proxy, apt_http_proxy, apt_https_proxy,
               ua_apt_http_proxy, ua_apt_https_proxy, global_apt_http_proxy,
-              global_apt_https_proxy, update_messaging_timer,
-              update_status_timer, metering_timer
+              global_apt_https_proxy, update_messaging_timer, metering_timer,
+              apt_news, apt_news_url
 
 Flags:
   -h, --help  show this help message and exit
@@ -37,7 +37,7 @@ class TestMainConfigUnSet:
                 " apt_http_proxy, apt_https_proxy, ua_apt_http_proxy,"
                 " ua_apt_https_proxy, global_apt_http_proxy,"
                 " global_apt_https_proxy, update_messaging_timer,"
-                " update_status_timer, metering_timer",
+                " metering_timer",
             ),
             (
                 "http_proxys",
@@ -45,19 +45,30 @@ class TestMainConfigUnSet:
                 " apt_http_proxy, apt_https_proxy, ua_apt_http_proxy,"
                 " ua_apt_https_proxy, global_apt_http_proxy,"
                 " global_apt_https_proxy, update_messaging_timer,"
-                " update_status_timer, metering_timer",
+                " metering_timer",
             ),
         ),
     )
     def test_set_error_with_help_on_invalid_key_value_pair(
-        self, _m_resources, _logging, _getuid, kv_pair, err_msg, capsys
+        self,
+        _m_resources,
+        _logging,
+        _getuid,
+        kv_pair,
+        err_msg,
+        capsys,
+        FakeConfig,
     ):
         """Exit 1 and print help on invalid key_value_pair input param."""
         with pytest.raises(SystemExit):
             with mock.patch(
                 "sys.argv", ["/usr/bin/ua", "config", "unset", kv_pair]
             ):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
         out, err = capsys.readouterr()
         assert HELP_OUTPUT == out
         assert err_msg in err
@@ -67,7 +78,7 @@ class TestMainConfigUnSet:
 @mock.patch("uaclient.cli.os.getuid", return_value=0)
 class TestActionConfigUnSet:
     def test_set_error_on_non_root_user(self, getuid, _write_cfg, FakeConfig):
-        """Root is required to run ua config unset."""
+        """Root is required to run pro config unset."""
         getuid.return_value = 1
         args = mock.MagicMock(key="https_proxy")
         cfg = FakeConfig()

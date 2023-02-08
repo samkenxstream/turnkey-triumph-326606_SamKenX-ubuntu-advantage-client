@@ -1,12 +1,32 @@
+import logging
+
 import mock
 import pytest
 
 from uaclient import exceptions, messages
-from uaclient.actions import attach_with_token, auto_attach
-from uaclient.exceptions import ContractAPIError, NonAutoAttachImageError
-from uaclient.tests.test_cli_auto_attach import fake_instance_factory
+from uaclient.actions import (
+    attach_with_token,
+    auto_attach,
+    collect_logs,
+    get_cloud_instance,
+)
+from uaclient.exceptions import (
+    CloudFactoryError,
+    CloudFactoryNoCloudError,
+    CloudFactoryNonViableCloudError,
+    CloudFactoryUnsupportedCloudError,
+    ContractAPIError,
+    NonAutoAttachImageError,
+    UserFacingError,
+)
 
 M_PATH = "uaclient.actions."
+
+
+def fake_instance_factory():
+    m_instance = mock.Mock()
+    m_instance.identity_doc = "pkcs7-validated-by-backend"
+    return m_instance
 
 
 class TestAttachWithToken:
@@ -80,42 +100,6 @@ class TestAutoAttach:
             mock.call(cfg, token="token", allow_enable=True)
         ] == m_attach_with_token.call_args_list
 
-    @pytest.mark.parametrize(
-        "http_msg,http_code,http_response",
-        (
-            ("Not found", 404, {"message": "missing instance information"}),
-            (
-                "Forbidden",
-                403,
-                {"message": "forbidden: cannot verify signing certificate"},
-            ),
-        ),
-    )
-    @mock.patch(
-        M_PATH + "contract.UAContractClient.request_auto_attach_contract_token"
-    )
-    @mock.patch(M_PATH + "identity.get_instance_id", return_value="old-iid")
-    def test_handles_4XX_contract_errors(
-        self,
-        _m_get_instance_id,
-        m_request_auto_attach_contract_token,
-        http_msg,
-        http_code,
-        http_response,
-        FakeConfig,
-    ):
-        """VMs running on non-auto-attach images do not return a token."""
-        cfg = FakeConfig()
-        m_request_auto_attach_contract_token.side_effect = ContractAPIError(
-            exceptions.UrlError(
-                http_msg, code=http_code, url="http://me", headers={}
-            ),
-            error_response=http_response,
-        )
-        with pytest.raises(NonAutoAttachImageError) as excinfo:
-            auto_attach(cfg, fake_instance_factory())
-        assert messages.UNSUPPORTED_AUTO_ATTACH == str(excinfo.value)
-
     @mock.patch(
         M_PATH + "contract.UAContractClient.request_auto_attach_contract_token"
     )
@@ -141,3 +125,89 @@ class TestAutoAttach:
             auto_attach(cfg, fake_instance_factory())
 
         assert unexpected_error == excinfo.value
+
+
+@mock.patch("uaclient.actions._write_command_output_to_file")
+class TestCollectLogs:
+    @pytest.mark.parametrize("caplog_text", [logging.WARNING], indirect=True)
+    @mock.patch("os.getuid")
+    @mock.patch("uaclient.system.write_file")
+    @mock.patch("uaclient.system.load_file")
+    @mock.patch("uaclient.actions._get_state_files")
+    @mock.patch("glob.glob")
+    def test_collect_logs_invalid_file(
+        self,
+        m_glob,
+        m_get_state_files,
+        m_load_file,
+        m_write_file,
+        m_getuid,
+        m_write_cmd,
+        caplog_text,
+    ):
+        m_get_state_files.return_value = ["a", "b"]
+        m_load_file.side_effect = [UnicodeError("test"), "test"]
+        m_getuid.return_value = 1
+        m_glob.return_value = []
+
+        with mock.patch("os.path.isfile", return_value=True):
+            collect_logs(cfg=mock.MagicMock(), output_dir="test")
+
+        assert 2 == m_load_file.call_count
+        assert [mock.call("a"), mock.call("b")] == m_load_file.call_args_list
+        assert 1 == m_write_file.call_count
+        assert [mock.call("test/b", "test")] == m_write_file.call_args_list
+        assert "Failed to load file: a\n" in caplog_text()
+
+
+class TestGetCloudInstance:
+    @pytest.mark.parametrize(
+        "cloud_factory_error, expected_error_cls, expected_error_msg",
+        [
+            (
+                CloudFactoryNoCloudError("test"),
+                UserFacingError,
+                messages.UNABLE_TO_DETERMINE_CLOUD_TYPE,
+            ),
+            (
+                CloudFactoryNonViableCloudError("test"),
+                UserFacingError,
+                messages.UNSUPPORTED_AUTO_ATTACH,
+            ),
+            (
+                CloudFactoryUnsupportedCloudError("test"),
+                NonAutoAttachImageError,
+                messages.UNSUPPORTED_AUTO_ATTACH_CLOUD_TYPE.format(
+                    cloud_type="test"
+                ),
+            ),
+            (
+                CloudFactoryNoCloudError("test"),
+                UserFacingError,
+                messages.UNABLE_TO_DETERMINE_CLOUD_TYPE,
+            ),
+            (
+                CloudFactoryError("test"),
+                UserFacingError,
+                messages.UNABLE_TO_DETERMINE_CLOUD_TYPE,
+            ),
+        ],
+    )
+    @mock.patch(M_PATH + "identity.cloud_instance_factory")
+    def test_handle_cloud_factory_errors(
+        self,
+        m_cloud_instance_factory,
+        cloud_factory_error,
+        expected_error_cls,
+        expected_error_msg,
+        FakeConfig,
+    ):
+        """Non-supported clouds will error."""
+        m_cloud_instance_factory.side_effect = cloud_factory_error
+        cfg = FakeConfig()
+
+        with pytest.raises(expected_error_cls) as excinfo:
+            get_cloud_instance(cfg=cfg)
+
+        if expected_error_msg:
+            assert expected_error_msg == str(excinfo.value)

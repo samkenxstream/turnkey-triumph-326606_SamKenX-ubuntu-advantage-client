@@ -2,22 +2,33 @@ import copy
 import json
 import logging
 import os
-import re
 from collections import namedtuple
-from datetime import datetime
 from functools import lru_cache, wraps
 from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
 
 import yaml
 
-from uaclient import apt, event_logger, exceptions, messages, snap, util
+from uaclient import (
+    apt,
+    event_logger,
+    exceptions,
+    files,
+    messages,
+    snap,
+    system,
+    util,
+)
 from uaclient.defaults import (
+    APT_NEWS_URL,
     BASE_CONTRACT_URL,
+    BASE_LIVEPATCH_URL,
     BASE_SECURITY_URL,
     CONFIG_DEFAULTS,
     CONFIG_FIELD_ENVVAR_ALLOWLIST,
     DEFAULT_CONFIG_FILE,
 )
+from uaclient.files import notices
+from uaclient.files.notices import Notice
 
 LOG = logging.getLogger(__name__)
 
@@ -28,7 +39,7 @@ MERGE_ID_KEY_MAP = {
 }
 UNSET_SETTINGS_OVERRIDE_KEY = "_unset"
 
-# Keys visible and configurable using `ua config set|unset|show` subcommands
+# Keys visible and configurable using `pro config set|unset|show` subcommands
 UA_CONFIGURABLE_KEYS = (
     "http_proxy",
     "https_proxy",
@@ -39,8 +50,9 @@ UA_CONFIGURABLE_KEYS = (
     "global_apt_http_proxy",
     "global_apt_https_proxy",
     "update_messaging_timer",
-    "update_status_timer",
     "metering_timer",
+    "apt_news",
+    "apt_news_url",
 )
 
 # Basic schema validation top-level keys for parse_config handling
@@ -55,6 +67,7 @@ VALID_UA_CONFIG_KEYS = (
     "timer_log_file",
     "daemon_log_file",
     "ua_config",
+    "livepatch_url",
 )
 
 # A data path is a filename, an attribute ("private") indicating whether it
@@ -78,22 +91,13 @@ class UAConfig:
     data_paths = {
         "instance-id": DataPath("instance-id", True, False),
         "machine-access-cis": DataPath("machine-access-cis.json", True, False),
-        "machine-token": DataPath("machine-token.json", True, False),
-        "lock": DataPath("lock", True, False),
+        "lock": DataPath("lock", False, False),
         "status-cache": DataPath("status.json", False, False),
-        "notices": DataPath("notices.json", False, False),
         "marker-reboot-cmds": DataPath(
             "marker-reboot-cmds-required", False, False
         ),
-        "services-once-enabled": DataPath(
-            "services-once-enabled", False, True
-        ),
-        "jobs-status": DataPath("jobs-status.json", False, True),
     }  # type: Dict[str, DataPath]
 
-    _entitlements = None  # caching to avoid repetitive file reads
-    _machine_token = None  # caching to avoid repetitive file reading
-    _contract_expiry_datetime = None
     ua_scoped_proxy_options = ("ua_apt_http_proxy", "ua_apt_https_proxy")
     global_scoped_proxy_options = (
         "global_apt_http_proxy",
@@ -104,24 +108,36 @@ class UAConfig:
         "apt_https_proxy",
     )
 
-    def __init__(self, cfg: Dict[str, Any] = None, series: str = None) -> None:
+    def __init__(
+        self,
+        cfg: Optional[Dict[str, Any]] = None,
+        series: Optional[str] = None,
+        root_mode: bool = False,
+    ) -> None:
         """"""
         if cfg:
             self.cfg_path = None
             self.cfg = cfg
+            self.invalid_keys = None
         else:
             self.cfg_path = get_config_path()
-            self.cfg = parse_config(self.cfg_path)
+            self.cfg, self.invalid_keys = parse_config(self.cfg_path)
 
         self.series = series
+        self.root_mode = root_mode
+        self._machine_token_file = (
+            None
+        )  # type: Optional[files.MachineTokenFile]
 
     @property
-    def accounts(self):
-        """Return the list of accounts that apply to this authorized user."""
-        if self.is_attached:
-            accountInfo = self.machine_token["machineTokenInfo"]["accountInfo"]
-            return [accountInfo]
-        return []
+    def machine_token_file(self):
+        if not self._machine_token_file:
+            self._machine_token_file = files.MachineTokenFile(
+                self.data_dir,
+                self.root_mode,
+                self.features.get("machine_token_overlay"),
+            )
+        return self._machine_token_file
 
     @property
     def contract_url(self) -> str:
@@ -130,6 +146,10 @@ class UAConfig:
     @property
     def security_url(self) -> str:
         return self.cfg.get("security_url", BASE_SECURITY_URL)
+
+    @property
+    def livepatch_url(self) -> str:
+        return self.cfg.get("livepatch_url", BASE_LIVEPATCH_URL)
 
     @property
     def http_proxy(self) -> Optional[str]:
@@ -222,17 +242,6 @@ class UAConfig:
         self.write_cfg()
 
     @property
-    def update_status_timer(self) -> Optional[int]:
-        return self.cfg.get("ua_config", {}).get("update_status_timer")
-
-    @update_status_timer.setter
-    def update_status_timer(self, value: int):
-        if "ua_config" not in self.cfg:
-            self.cfg["ua_config"] = {}
-        self.cfg["ua_config"]["update_status_timer"] = value
-        self.write_cfg()
-
-    @property
     def update_messaging_timer(self) -> Optional[int]:
         return self.cfg.get("ua_config", {}).get("update_messaging_timer")
 
@@ -283,6 +292,28 @@ class UAConfig:
         self.cfg["ua_config"]["polling_error_retry_delay"] = value
         self.write_cfg()
 
+    @property
+    def apt_news(self) -> bool:
+        return self.cfg.get("ua_config", {}).get("apt_news", True)
+
+    @apt_news.setter
+    def apt_news(self, value: bool):
+        if "ua_config" not in self.cfg:
+            self.cfg["ua_config"] = {}
+        self.cfg["ua_config"]["apt_news"] = value
+        self.write_cfg()
+
+    @property
+    def apt_news_url(self) -> str:
+        return self.cfg.get("ua_config", {}).get("apt_news_url", APT_NEWS_URL)
+
+    @apt_news_url.setter
+    def apt_news_url(self, value: str):
+        if "ua_config" not in self.cfg:
+            self.cfg["ua_config"] = {}
+        self.cfg["ua_config"]["apt_news_url"] = value
+        self.write_cfg()
+
     def check_lock_info(self) -> Tuple[int, str]:
         """Return lock info if config lock file is present the lock is active.
 
@@ -298,10 +329,10 @@ class UAConfig:
         no_lock = (-1, "")
         if not os.path.exists(lock_path):
             return no_lock
-        lock_content = util.load_file(lock_path)
+        lock_content = system.load_file(lock_path)
         [lock_pid, lock_holder] = lock_content.split(":")
         try:
-            util.subp(["ps", lock_pid])
+            system.subp(["ps", lock_pid])
             return (int(lock_pid), lock_holder)
         except exceptions.ProcessExecutionError:
             if os.getuid() != 0:
@@ -316,7 +347,7 @@ class UAConfig:
                 lock_pid,
                 lock_holder,
             )
-            os.unlink(lock_path)
+            system.ensure_file_absent(lock_path)
             return no_lock
 
     @property
@@ -325,43 +356,11 @@ class UAConfig:
 
     @property
     def log_level(self):
-        log_level = self.cfg.get("log_level")
+        log_level = self.cfg.get("log_level", "DEBUG")
         try:
             return getattr(logging, log_level.upper())
         except AttributeError:
             return getattr(logging, CONFIG_DEFAULTS["log_level"])
-
-    def add_notice(self, label: str, description: str):
-        """Add a notice message to notices cache.
-
-        Such notices are seen in the Notices section from ua status output.
-        They are also present in the JSON status output.
-        """
-        notices = self.read_cache("notices") or []
-        notice = [label, description]
-        if notice not in notices:
-            notices.append(notice)
-            self.write_cache("notices", notices)
-
-    def remove_notice(self, label_regex: str, descr_regex: str):
-        """Remove matching notices if present.
-
-        :param label_regex: Regex used to remove notices with matching labels.
-        :param descr_regex: Regex used to remove notices with matching
-            descriptions.
-        """
-        notices = []
-        cached_notices = self.read_cache("notices")
-        if cached_notices:
-            for notice_label, notice_descr in cached_notices:
-                if re.match(label_regex, notice_label):
-                    if re.match(descr_regex, notice_descr):
-                        continue
-                notices.append((notice_label, notice_descr))
-        if notices:
-            self.write_cache("notices", notices)
-        elif os.path.exists(self.data_path("notices")):
-            util.remove_file(self.data_path("notices"))
 
     @property
     def log_file(self) -> str:
@@ -380,76 +379,9 @@ class UAConfig:
         )
 
     @property
-    def entitlements(self):
-        """Return configured entitlements keyed by entitlement named"""
-        if self._entitlements:
-            return self._entitlements
-        if not self.machine_token:
-            return {}
-        self._entitlements = self.get_entitlements_from_token(
-            self.machine_token
-        )
-        return self._entitlements
-
-    @staticmethod
-    def get_entitlements_from_token(machine_token: Dict):
-        """Return a dictionary of entitlements keyed by entitlement name.
-
-        Return an empty dict if no entitlements are present.
-        """
-        if not machine_token:
-            return {}
-
-        entitlements = {}
-        contractInfo = machine_token.get("machineTokenInfo", {}).get(
-            "contractInfo"
-        )
-        if not contractInfo:
-            return {}
-
-        tokens_by_name = dict(
-            (e.get("type"), e.get("token"))
-            for e in machine_token.get("resourceTokens", [])
-        )
-        ent_by_name = dict(
-            (e.get("type"), e)
-            for e in contractInfo.get("resourceEntitlements", [])
-        )
-        for entitlement_name, ent_value in ent_by_name.items():
-            entitlement_cfg = {"entitlement": ent_value}
-            if entitlement_name in tokens_by_name:
-                entitlement_cfg["resourceToken"] = tokens_by_name[
-                    entitlement_name
-                ]
-            util.apply_contract_overrides(entitlement_cfg)
-            entitlements[entitlement_name] = entitlement_cfg
-        return entitlements
-
-    @property
-    def contract_expiry_datetime(self) -> datetime:
-        """Return a datetime of the attached contract expiration."""
-        if not self._contract_expiry_datetime:
-            self._contract_expiry_datetime = self.machine_token[
-                "machineTokenInfo"
-            ]["contractInfo"]["effectiveTo"]
-
-        return self._contract_expiry_datetime
-
-    @property
     def is_attached(self):
         """Report whether this machine configuration is attached to UA."""
         return bool(self.machine_token)  # machine_token is removed on detach
-
-    @property
-    def contract_remaining_days(self) -> int:
-        """Report num days until contract expiration based on effectiveTo
-
-        :return: A positive int representing the number of days the attached
-            contract remains in effect. Return a negative int for the number
-            of days beyond contract's effectiveTo date.
-        """
-        delta = self.contract_expiry_datetime.date() - datetime.utcnow().date()
-        return delta.days
 
     @property
     def features(self):
@@ -469,80 +401,7 @@ class UAConfig:
     @property
     def machine_token(self):
         """Return the machine-token if cached in the machine token response."""
-        if not self._machine_token:
-            raw_machine_token = self.read_cache("machine-token")
-
-            machine_token_overlay_path = self.features.get(
-                "machine_token_overlay"
-            )
-
-            if raw_machine_token and machine_token_overlay_path:
-                machine_token_overlay = self.parse_machine_token_overlay(
-                    machine_token_overlay_path
-                )
-
-                if machine_token_overlay:
-                    depth_first_merge_overlay_dict(
-                        base_dict=raw_machine_token,
-                        overlay_dict=machine_token_overlay,
-                    )
-
-            self._machine_token = raw_machine_token
-
-        return self._machine_token
-
-    @property
-    def activity_token(self) -> "Optional[str]":
-        if self.machine_token:
-            return self.machine_token.get("activityInfo", {}).get(
-                "activityToken"
-            )
-        return None
-
-    @property
-    def activity_id(self) -> "Optional[str]":
-        if self.machine_token:
-            return self.machine_token.get("activityInfo", {}).get("activityID")
-        return None
-
-    @property
-    def activity_ping_interval(self) -> "Optional[int]":
-        if self.machine_token:
-            return self.machine_token.get("activityInfo", {}).get(
-                "activityPingInterval"
-            )
-        return None
-
-    @property
-    def contract_id(self):
-        if self.machine_token:
-            return (
-                self.machine_token.get("machineTokenInfo", {})
-                .get("contractInfo", {})
-                .get("id")
-            )
-        return None
-
-    def parse_machine_token_overlay(self, machine_token_overlay_path):
-        if not os.path.exists(machine_token_overlay_path):
-            raise exceptions.UserFacingError(
-                messages.INVALID_PATH_FOR_MACHINE_TOKEN_OVERLAY.format(
-                    file_path=machine_token_overlay_path
-                )
-            )
-
-        try:
-            machine_token_overlay_content = util.load_file(
-                machine_token_overlay_path
-            )
-
-            return json.loads(machine_token_overlay_content)
-        except ValueError as e:
-            raise exceptions.UserFacingError(
-                messages.ERROR_JSON_DECODING_IN_FILE.format(
-                    error=str(e), file_path=machine_token_overlay_path
-                )
-            )
+        return self.machine_token_file.machine_token
 
     def data_path(self, key: Optional[str] = None) -> str:
         """Return the file path in the data directory represented by the key"""
@@ -568,8 +427,7 @@ class UAConfig:
         (This is a separate method to allow easier disabling of deletion during
         tests.)
         """
-        if os.path.exists(cache_path):
-            os.unlink(cache_path)
+        system.ensure_file_absent(cache_path)
 
     def delete_cache_key(self, key: str) -> None:
         """Remove specific cache file."""
@@ -577,11 +435,10 @@ class UAConfig:
             raise RuntimeError(
                 "Invalid or empty key provided to delete_cache_key"
             )
-        if key.startswith("machine-access") or key == "machine-token":
-            self._entitlements = None
-            self._machine_token = None
+        if key.startswith("machine-access"):
+            self._machine_token_file = None
         elif key == "lock":
-            self.remove_notice("", "Operation in progress.*")
+            notices.remove(self.root_mode, Notice.OPERATION_IN_PROGRESS)
         cache_path = self.data_path(key)
         self._perform_delete(cache_path)
 
@@ -598,7 +455,7 @@ class UAConfig:
     def read_cache(self, key: str, silent: bool = False) -> Optional[Any]:
         cache_path = self.data_path(key)
         try:
-            content = util.load_file(cache_path)
+            content = system.load_file(cache_path)
         except Exception:
             if not os.path.exists(cache_path) and not silent:
                 logging.debug("File does not exist: %s", cache_path)
@@ -612,17 +469,17 @@ class UAConfig:
         filepath = self.data_path(key)
         data_dir = os.path.dirname(filepath)
         if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
+            os.makedirs(data_dir, exist_ok=True)
             if os.path.basename(data_dir) == PRIVATE_SUBDIR:
                 os.chmod(data_dir, 0o700)
-        if key.startswith("machine-access") or key == "machine-token":
-            self._machine_token = None
-            self._entitlements = None
+        if key.startswith("machine-access"):
+            self._machine_token_file = None
         elif key == "lock":
             if ":" in content:
-                self.add_notice(
-                    "",
-                    "Operation in progress: {}".format(content.split(":")[1]),
+                notices.add(
+                    self.root_mode,
+                    Notice.OPERATION_IN_PROGRESS,
+                    operation=content.split(":")[1],
                 )
         if not isinstance(content, str):
             content = json.dumps(content, cls=util.DatetimeAwareJSONEncoder)
@@ -630,12 +487,11 @@ class UAConfig:
         if key in self.data_paths:
             if not self.data_paths[key].private:
                 mode = 0o644
-        util.write_file(filepath, content, mode=mode)
+        system.write_file(filepath, content, mode=mode)
 
     def process_config(self):
         for prop in (
             "update_messaging_timer",
-            "update_status_timer",
             "metering_timer",
         ):
             value = getattr(self, prop)
@@ -765,7 +621,14 @@ class UAConfig:
         }
 
         content += yaml.dump(cfg_dict, default_flow_style=False)
-        util.write_file(config_path, content)
+        system.write_file(config_path, content)
+
+    def warn_about_invalid_keys(self):
+        if self.invalid_keys is not None:
+            for invalid_key in sorted(self.invalid_keys):
+                logging.warning(
+                    "Ignoring invalid uaclient.conf key: %s", invalid_key
+                )
 
 
 def get_config_path() -> str:
@@ -784,26 +647,26 @@ def get_config_path() -> str:
 
 
 def parse_config(config_path=None):
-    """Parse known UA config file
+    """Parse known Pro config file
 
     Attempt to find configuration in cwd and fallback to DEFAULT_CONFIG_FILE.
     Any missing configuration keys will be set to CONFIG_DEFAULTS.
 
     Values are overridden by any environment variable with prefix 'UA_'.
 
-    @param config_path: Fullpath to ua configfile. If unspecified, use
+    @param config_path: Fullpath to pro configfile. If unspecified, use
         DEFAULT_CONFIG_FILE.
 
     @return: Dict of configuration values.
     """
-    cfg = copy.copy(CONFIG_DEFAULTS)
+    cfg = copy.copy(CONFIG_DEFAULTS)  # type: Dict[str, Any]
 
     if not config_path:
         config_path = get_config_path()
 
-    LOG.debug("Using UA client configuration file at %s", config_path)
+    LOG.debug("Using client configuration file at %s", config_path)
     if os.path.exists(config_path):
-        cfg.update(yaml.safe_load(util.load_file(config_path)))
+        cfg.update(yaml.safe_load(system.load_file(config_path)))
     env_keys = {}
     for key, value in os.environ.items():
         key = key.lower()
@@ -820,7 +683,7 @@ def parse_config(config_path=None):
                 # with it
                 if value.endswith("yaml"):
                     if os.path.exists(value):
-                        value = yaml.safe_load(util.load_file(value))
+                        value = yaml.safe_load(system.load_file(value))
                     else:
                         raise exceptions.UserFacingError(
                             "Could not find yaml file: {}".format(value)
@@ -839,13 +702,12 @@ def parse_config(config_path=None):
             raise exceptions.UserFacingError(
                 "Invalid url in config. {}: {}".format(key, cfg[key])
             )
-    # log about invalid keys before ignoring
-    for key in sorted(set(cfg.keys()).difference(VALID_UA_CONFIG_KEYS)):
-        logging.warning(
-            "Ignoring invalid uaclient.conf key: %s=%s", key, cfg.pop(key)
-        )
 
-    return cfg
+    invalid_keys = set(cfg.keys()).difference(VALID_UA_CONFIG_KEYS)
+    for invalid_key in invalid_keys:
+        cfg.pop(invalid_key)
+
+    return cfg, invalid_keys
 
 
 def apply_config_settings_override(override_key: str):
@@ -864,7 +726,7 @@ def apply_config_settings_override(override_key: str):
     def wrapper(f):
         @wraps(f)
         def new_f():
-            cfg = parse_config()
+            cfg, _ = parse_config()
             value_override = cfg.get("settings_overrides", {}).get(
                 override_key, UNSET_SETTINGS_OVERRIDE_KEY
             )
@@ -879,50 +741,3 @@ def apply_config_settings_override(override_key: str):
         return new_f
 
     return wrapper
-
-
-def depth_first_merge_overlay_dict(base_dict, overlay_dict):
-    """Merge the contents of overlay dict into base_dict not only on top-level
-    keys, but on all on the depths of the overlay_dict object. For example,
-    using these values as entries for the function:
-
-    base_dict = {"a": 1, "b": {"c": 2, "d": 3}}
-    overlay_dict = {"b": {"c": 10}}
-
-    Should update base_dict into:
-
-    {"a": 1, "b": {"c": 10, "d": 3}}
-
-    @param base_dict: The dict to be updated
-    @param overlay_dict: The dict with information to be added into base_dict
-    """
-
-    def update_dict_list(base_values, overlay_values, key):
-        values_to_append = []
-        id_key = MERGE_ID_KEY_MAP.get(key)
-        for overlay_value in overlay_values:
-            was_replaced = False
-            for base_value_idx, base_value in enumerate(base_values):
-                if base_value.get(id_key) == overlay_value.get(id_key):
-                    depth_first_merge_overlay_dict(base_value, overlay_value)
-                    was_replaced = True
-
-            if not was_replaced:
-                values_to_append.append(overlay_value)
-
-        base_values.extend(values_to_append)
-
-    for key, value in overlay_dict.items():
-        base_value = base_dict.get(key)
-        if isinstance(base_value, dict) and isinstance(value, dict):
-            depth_first_merge_overlay_dict(base_dict[key], value)
-        elif isinstance(base_value, list) and isinstance(value, list):
-            if len(base_value) and isinstance(base_value[0], dict):
-                update_dict_list(base_dict[key], value, key=key)
-            else:
-                """
-                Most other lists which aren't lists of dicts are lists of
-                strs. Replace that list # with the overlay value."""
-                base_dict[key] = value
-        else:
-            base_dict[key] = value

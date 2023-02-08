@@ -2,27 +2,56 @@ import contextlib
 import copy
 import io
 import json
+import textwrap
 
 import mock
 import pytest
 import yaml
 
-from uaclient import event_logger, messages, status
+from uaclient import event_logger, messages, status, util
 from uaclient.cli import (
     UA_AUTH_TOKEN_URL,
     action_attach,
     attach_parser,
     get_parser,
+    main,
     main_error_handler,
 )
 from uaclient.exceptions import (
     AlreadyAttachedError,
     LockHeldError,
+    MagicAttachInvalidParam,
+    MagicAttachTokenError,
     NonRootUserError,
     UrlError,
     UserFacingError,
 )
 from uaclient.testing.fakes import FakeFile
+
+HELP_OUTPUT = textwrap.dedent(
+    """\
+usage: pro attach <token> [flags]
+
+Attach this machine to Ubuntu Pro with a token obtained from:
+https://ubuntu.com/pro
+
+When running this command without a token, it will generate a short code
+and prompt you to attach the machine to your Ubuntu Pro account using
+a web browser.
+
+positional arguments:
+  token                 token obtained for Ubuntu Pro authentication:
+                        https://auth.contracts.canonical.com
+
+Flags:
+  -h, --help            show this help message and exit
+  --no-auto-enable      do not enable any recommended services automatically
+  --attach-config ATTACH_CONFIG
+                        use the provided attach config file instead of passing
+                        the token on the cli
+  --format {cli,json}   output enable in the specified format (default: cli)
+"""
+)
 
 M_PATH = "uaclient.cli."
 
@@ -35,7 +64,8 @@ BASIC_MACHINE_TOKEN = {
         "contractInfo": {
             "name": "mycontract",
             "id": "contract-1",
-            "createdAt": "2020-05-08T19:02:26Z",
+            "createdAt": util.parse_rfc3339_date("2020-05-08T19:02:26Z"),
+            "effectiveTo": util.parse_rfc3339_date("9999-12-31T00:00:00Z"),
             "resourceEntitlements": [],
             "products": ["free"],
         },
@@ -117,7 +147,9 @@ class TestActionAttach:
     def test_already_attached(self, _m_getuid, capsys, FakeConfig, event):
         """Check that an already-attached machine emits message and exits 0"""
         account_name = "test_account"
-        cfg = FakeConfig.for_attached_machine(account_name=account_name)
+        cfg = FakeConfig.for_attached_machine(
+            account_name=account_name,
+        )
 
         with pytest.raises(AlreadyAttachedError):
             action_attach(mock.MagicMock(), cfg=cfg)
@@ -147,19 +179,24 @@ class TestActionAttach:
         }
         assert expected == json.loads(capsys.readouterr()[0])
 
-    @mock.patch(M_PATH + "util.subp")
+    @mock.patch("uaclient.system.subp")
     def test_lock_file_exists(
-        self, m_subp, _m_getuid, capsys, FakeConfig, event
+        self,
+        m_subp,
+        _m_getuid,
+        capsys,
+        FakeConfig,
+        event,
     ):
         """Check when an operation holds a lock file, attach cannot run."""
         cfg = FakeConfig()
-        cfg.write_cache("lock", "123:ua disable")
+        cfg.write_cache("lock", "123:pro disable")
         with pytest.raises(LockHeldError) as exc_info:
             action_attach(mock.MagicMock(), cfg=cfg)
         assert [mock.call(["ps", "123"])] == m_subp.call_args_list
         assert (
-            "Unable to perform: ua attach.\n"
-            "Operation in progress: ua disable (pid:123)"
+            "Unable to perform: pro attach.\n"
+            "Operation in progress: pro disable (pid:123)"
         ) == exc_info.value.msg
 
         with pytest.raises(SystemExit):
@@ -173,50 +210,8 @@ class TestActionAttach:
                     main_error_handler(action_attach)(mock.MagicMock(), cfg)
 
         expected_msg = messages.LOCK_HELD_ERROR.format(
-            lock_request="ua attach", lock_holder="lock_holder", pid=1
+            lock_request="pro attach", lock_holder="lock_holder", pid=1
         )
-        expected = {
-            "_schema_version": event_logger.JSON_SCHEMA_VERSION,
-            "result": "failure",
-            "errors": [
-                {
-                    "message": expected_msg.msg,
-                    "message_code": expected_msg.name,
-                    "service": None,
-                    "type": "system",
-                }
-            ],
-            "failed_services": [],
-            "needs_reboot": False,
-            "processed_services": [],
-            "warnings": [],
-        }
-        assert expected == json.loads(capsys.readouterr()[0])
-
-    def test_token_is_a_required_argument(
-        self, _m_getuid, FakeConfig, capsys, event
-    ):
-        """When missing the required token argument, raise a UserFacingError"""
-        args = mock.MagicMock(token=None, attach_config=None)
-        cfg = FakeConfig()
-        with pytest.raises(UserFacingError) as e:
-            action_attach(args, cfg=cfg)
-        assert messages.ATTACH_REQUIRES_TOKEN.msg == str(e.value.msg)
-
-        args = mock.MagicMock()
-        args.token = None
-        args.attach_config = None
-        with pytest.raises(SystemExit):
-            with mock.patch.object(
-                event, "_event_logger_mode", event_logger.EventLoggerMode.JSON
-            ):
-                with mock.patch.object(
-                    cfg, "check_lock_info"
-                ) as m_check_lock_info:
-                    m_check_lock_info.return_value = (0, "lock_holder")
-                    main_error_handler(action_attach)(args, cfg)
-
-        expected_msg = messages.ATTACH_REQUIRES_TOKEN
         expected = {
             "_schema_version": event_logger.JSON_SCHEMA_VERSION,
             "result": "failure",
@@ -242,8 +237,8 @@ class TestActionAttach:
             (UserFacingError, "Unable to attach default services"),
         ),
     )
-    @mock.patch("uaclient.util.should_reboot", return_value=False)
-    @mock.patch("uaclient.config.UAConfig.remove_notice")
+    @mock.patch("uaclient.system.should_reboot", return_value=False)
+    @mock.patch("uaclient.files.notices.NoticesManager.remove")
     @mock.patch("uaclient.status.get_available_resources")
     @mock.patch("uaclient.jobs.update_messaging.update_apt_and_motd_messages")
     @mock.patch(M_PATH + "contract.request_updated_contract")
@@ -252,8 +247,8 @@ class TestActionAttach:
         request_updated_contract,
         m_update_apt_and_motd_msgs,
         _m_get_available_resources,
-        _m_should_reboot,
         _m_remove_notice,
+        _m_should_reboot,
         _m_get_uid,
         error_class,
         error_str,
@@ -269,7 +264,7 @@ class TestActionAttach:
         orig_unattached_status = cfg.read_cache("status-cache")
 
         def fake_request_updated_contract(cfg, contract_token, allow_enable):
-            cfg.write_cache("machine-token", ENTITLED_MACHINE_TOKEN)
+            cfg.machine_token_file.write(ENTITLED_MACHINE_TOKEN)
             raise error_class(error_str)
 
         request_updated_contract.side_effect = fake_request_updated_contract
@@ -284,8 +279,8 @@ class TestActionAttach:
         ), "Did not persist on disk status during attach failure"
         assert [mock.call(cfg)] == m_update_apt_and_motd_msgs.call_args_list
 
-    @mock.patch("uaclient.util.should_reboot", return_value=False)
-    @mock.patch("uaclient.config.UAConfig.remove_notice")
+    @mock.patch("uaclient.system.should_reboot", return_value=False)
+    @mock.patch("uaclient.files.notices.NoticesManager.remove")
     @mock.patch("uaclient.jobs.update_messaging.update_apt_and_motd_messages")
     @mock.patch(
         M_PATH + "contract.UAContractClient.request_contract_machine_attach"
@@ -298,8 +293,8 @@ class TestActionAttach:
         m_status,
         contract_machine_attach,
         m_update_apt_and_motd_msgs,
-        _m_should_reboot,
         _m_remove_notice,
+        _m_should_reboot,
         _m_getuid,
         FakeConfig,
         event,
@@ -312,7 +307,7 @@ class TestActionAttach:
         cfg = FakeConfig()
 
         def fake_contract_attach(contract_token):
-            cfg.write_cache("machine-token", BASIC_MACHINE_TOKEN)
+            cfg.machine_token_file.write(BASIC_MACHINE_TOKEN)
             return BASIC_MACHINE_TOKEN
 
         contract_machine_attach.side_effect = fake_contract_attach
@@ -332,6 +327,7 @@ class TestActionAttach:
         # file, which will make all other cfg objects here to report
         # as attached
         cfg.delete_cache()
+        cfg.machine_token_file.delete()
 
         cfg = FakeConfig()
         args = mock.MagicMock(token=token, attach_config=None)
@@ -358,16 +354,16 @@ class TestActionAttach:
         assert expected == json.loads(fake_stdout.getvalue())
 
     @pytest.mark.parametrize("auto_enable", (True, False))
-    @mock.patch("uaclient.util.should_reboot", return_value=False)
-    @mock.patch("uaclient.config.UAConfig.remove_notice")
+    @mock.patch("uaclient.system.should_reboot", return_value=False)
+    @mock.patch("uaclient.files.notices.NoticesManager.remove")
     @mock.patch("uaclient.status.get_available_resources")
     @mock.patch("uaclient.jobs.update_messaging.update_apt_and_motd_messages")
     def test_auto_enable_passed_through_to_request_updated_contract(
         self,
         m_update_apt_and_motd_msgs,
         _m_get_available_resources,
-        _m_should_reboot,
         _m_remove_notice,
+        _m_should_reboot,
         _m_get_uid,
         auto_enable,
         FakeConfig,
@@ -375,7 +371,7 @@ class TestActionAttach:
         args = mock.MagicMock(auto_enable=auto_enable, attach_config=None)
 
         def fake_contract_updates(cfg, contract_token, allow_enable):
-            cfg.write_cache("machine-token", BASIC_MACHINE_TOKEN)
+            cfg.machine_token_file.write(BASIC_MACHINE_TOKEN)
             return True
 
         cfg = FakeConfig()
@@ -388,7 +384,9 @@ class TestActionAttach:
         assert [mock.call(cfg)] == m_update_apt_and_motd_msgs.call_args_list
 
     def test_attach_config_and_token_mutually_exclusive(
-        self, _m_getuid, FakeConfig
+        self,
+        _m_getuid,
+        FakeConfig,
     ):
         args = mock.MagicMock(
             token="something", attach_config=FakeFile("something")
@@ -401,7 +399,11 @@ class TestActionAttach:
     @mock.patch(M_PATH + "_post_cli_attach")
     @mock.patch(M_PATH + "actions.attach_with_token")
     def test_token_from_attach_config(
-        self, m_attach_with_token, _m_post_cli_attach, _m_getuid, FakeConfig
+        self,
+        m_attach_with_token,
+        _m_post_cli_attach,
+        _m_getuid,
+        FakeConfig,
     ):
         args = mock.MagicMock(
             token=None,
@@ -414,7 +416,11 @@ class TestActionAttach:
         ] == m_attach_with_token.call_args_list
 
     def test_attach_config_invalid_config(
-        self, _m_getuid, FakeConfig, capsys, event
+        self,
+        _m_getuid,
+        FakeConfig,
+        capsys,
+        event,
     ):
         args = mock.MagicMock(
             token=None,
@@ -443,7 +449,7 @@ class TestActionAttach:
             error=(
                 "Got value with "
                 'incorrect type for field\n"enable_services": '
-                "Expected value with type list but got value: 'cis'"
+                "Expected value with type list but got type: str"
             ),
         )
 
@@ -474,10 +480,12 @@ class TestActionAttach:
     @mock.patch("uaclient.util.handle_unicode_characters")
     @mock.patch("uaclient.status.format_tabular")
     @mock.patch(M_PATH + "actions.status")
+    @mock.patch("uaclient.daemon.cleanup")
     @mock.patch("uaclient.daemon.stop")
     def test_attach_config_enable_services(
         self,
         _m_daemon_stop,
+        _m_daemon_cleanup,
         m_status,
         m_format_tabular,
         m_handle_unicode,
@@ -533,8 +541,9 @@ class TestActionAttach:
         }
         assert expected == json.loads(fake_stdout.getvalue())
 
+    @mock.patch("uaclient.entitlements.entitlements_enable_order")
     @mock.patch("uaclient.contract.process_entitlement_delta")
-    @mock.patch("uaclient.util.apply_contract_overrides")
+    @mock.patch("uaclient.contract.apply_contract_overrides")
     @mock.patch("uaclient.contract.UAContractClient.request_url")
     @mock.patch("uaclient.jobs.update_messaging.update_apt_and_motd_messages")
     def test_attach_when_one_service_fails_to_enable(
@@ -543,6 +552,7 @@ class TestActionAttach:
         m_request_url,
         _m_apply_contract_overrides,
         m_process_entitlement_delta,
+        m_enable_order,
         _m_getuid,
         FakeConfig,
         event,
@@ -550,6 +560,7 @@ class TestActionAttach:
         args = mock.MagicMock(token="token", attach_config=None)
         cfg = FakeConfig()
 
+        m_enable_order.return_value = ["test1", "test2"]
         m_process_entitlement_delta.side_effect = [
             ({"test": 123}, True),
             UserFacingError("error"),
@@ -562,9 +573,11 @@ class TestActionAttach:
                     "accountInfo": {
                         "id": "acct-1",
                         "name": "acc-name",
-                        "createdAt": "2019-06-14T06:45:50Z",
+                        "createdAt": util.parse_rfc3339_date(
+                            "2019-06-14T06:45:50Z"
+                        ),
                         "externalAccountIDs": [
-                            {"IDs": ["id1"], "Origin": "AWS"}
+                            {"IDs": ["id1"], "origin": "AWS"}
                         ],
                     },
                     "contractInfo": {
@@ -613,12 +626,59 @@ class TestActionAttach:
         }
         assert expected == json.loads(fake_stdout.getvalue())
 
+    @mock.patch(M_PATH + "_initiate")
+    @mock.patch(M_PATH + "_wait")
+    @mock.patch(M_PATH + "_revoke")
+    def test_magic_attach_revoke_token_if_wait_fails(
+        self,
+        m_revoke,
+        m_wait,
+        m_initiate,
+        _m_getuid,
+        FakeConfig,
+    ):
+        m_initiate.return_value = mock.MagicMock(
+            token="token", user_code="user_code"
+        )
+        m_wait.side_effect = MagicAttachTokenError()
+        m_args = mock.MagicMock(token=None, attach_config=None)
+
+        with pytest.raises(MagicAttachTokenError):
+            action_attach(args=m_args, cfg=FakeConfig())
+
+        assert 1 == m_initiate.call_count
+        assert 1 == m_wait.call_count
+        assert 1 == m_revoke.call_count
+
+    def test_magic_attach_fails_if_format_json_param_used(
+        self, _m_getuid, FakeConfig
+    ):
+        m_args = mock.MagicMock(token=None, attach_config=None, format="json")
+
+        with pytest.raises(MagicAttachInvalidParam) as exc_info:
+            action_attach(args=m_args, cfg=FakeConfig())
+
+        assert (
+            "This attach flow does not support --format with value: json"
+        ) == exc_info.value.msg
+
 
 @mock.patch(M_PATH + "contract.get_available_resources")
 class TestParser:
+    def test_attach_help(self, _m_resources, capsys, FakeConfig):
+        with pytest.raises(SystemExit):
+            with mock.patch("sys.argv", ["/usr/bin/pro", "attach", "--help"]):
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
+        out, _err = capsys.readouterr()
+        assert HELP_OUTPUT in out
+
     def test_attach_parser_usage(self, _m_resources):
         parser = attach_parser(mock.Mock())
-        assert "ua attach <token> [flags]" == parser.usage
+        assert "pro attach <token> [flags]" == parser.usage
 
     def test_attach_parser_prog(self, _m_resources):
         parser = attach_parser(mock.Mock())
@@ -630,7 +690,7 @@ class TestParser:
 
     def test_attach_parser_stores_token(self, _m_resources, FakeConfig):
         full_parser = get_parser(FakeConfig())
-        with mock.patch("sys.argv", ["ua", "attach", "token"]):
+        with mock.patch("sys.argv", ["pro", "attach", "token"]):
             args = full_parser.parse_args()
         assert "token" == args.token
 
@@ -639,16 +699,16 @@ class TestParser:
     ):
         """Token required but parse_args allows none due to action_attach"""
         full_parser = get_parser(FakeConfig())
-        with mock.patch("sys.argv", ["ua", "attach"]):
+        with mock.patch("sys.argv", ["pro", "attach"]):
             args = full_parser.parse_args()
         assert None is args.token
 
     def test_attach_parser_help_points_to_ua_contract_dashboard_url(
         self, _m_resources, capsys, FakeConfig
     ):
-        """Contracts' dashboard URL is referenced by ua attach --help."""
+        """Contracts' dashboard URL is referenced by pro attach --help."""
         full_parser = get_parser(FakeConfig())
-        with mock.patch("sys.argv", ["ua", "attach", "--help"]):
+        with mock.patch("sys.argv", ["pro", "attach", "--help"]):
             with pytest.raises(SystemExit):
                 full_parser.parse_args()
         assert UA_AUTH_TOKEN_URL in capsys.readouterr()[0]
@@ -658,7 +718,7 @@ class TestParser:
     ):
         full_parser = get_parser(FakeConfig())
         with mock.patch(
-            "sys.argv", ["ua", "attach", "--no-auto-enable", "token"]
+            "sys.argv", ["pro", "attach", "--no-auto-enable", "token"]
         ):
             args = full_parser.parse_args()
         assert not args.auto_enable
@@ -667,7 +727,7 @@ class TestParser:
         self, _m_resources, FakeConfig
     ):
         full_parser = get_parser(FakeConfig())
-        with mock.patch("sys.argv", ["ua", "attach", "token"]):
+        with mock.patch("sys.argv", ["pro", "attach", "token"]):
             args = full_parser.parse_args()
         assert args.auto_enable
 
@@ -675,14 +735,14 @@ class TestParser:
         self, _m_resources, FakeConfig
     ):
         full_parser = get_parser(FakeConfig())
-        with mock.patch("sys.argv", ["ua", "attach", "token"]):
+        with mock.patch("sys.argv", ["pro", "attach", "token"]):
             args = full_parser.parse_args()
         assert "cli" == args.format
 
     def test_attach_parser_accepts_format_flag(self, _m_resources, FakeConfig):
         full_parser = get_parser(FakeConfig())
         with mock.patch(
-            "sys.argv", ["ua", "attach", "token", "--format", "json"]
+            "sys.argv", ["pro", "attach", "token", "--format", "json"]
         ):
             args = full_parser.parse_args()
         assert "json" == args.format

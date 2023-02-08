@@ -14,6 +14,7 @@ class CISEntitlement(repo.RepoEntitlement):
     description = "Security compliance and audit tools"
     repo_key_file = "ubuntu-advantage-cis.gpg"
     apt_noninteractive = True
+    supports_access_only = True
 
     @property
     def messaging(self) -> MessagingOperationsDict:
@@ -30,8 +31,8 @@ class CISEntitlement(repo.RepoEntitlement):
         }  # type: MessagingOperationsDict
         if "usg" in self.valid_names:
             messages["pre_can_enable"] = [
-                "From Ubuntu 20.04 and onwards 'ua enable cis' has been",
-                "replaced by 'ua enable usg'. See more information at:",
+                "From Ubuntu 20.04 and onwards 'pro enable cis' has been",
+                "replaced by 'pro enable usg'. See more information at:",
                 USG_DOCS_URL,
             ]
         return messages

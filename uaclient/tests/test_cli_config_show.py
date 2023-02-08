@@ -6,18 +6,18 @@ from uaclient.cli import action_config_show, main
 M_PATH = "uaclient.cli."
 
 HELP_OUTPUT = """\
-usage: ua config <command> [flags]
+usage: pro config <command> [flags]
 
-Manage Ubuntu Advantage configuration
+Manage Ubuntu Pro configuration
 
 Flags:
   -h, --help  show this help message and exit
 
 Available Commands:
   
-    show      show all Ubuntu Advantage configuration setting(s)
-    set       set Ubuntu Advantage configuration setting
-    unset     unset Ubuntu Advantage configuration setting
+    show      show all Ubuntu Pro configuration setting(s)
+    set       set Ubuntu Pro configuration setting
+    unset     unset Ubuntu Pro configuration setting
 """  # noqa
 
 
@@ -27,14 +27,24 @@ Available Commands:
 class TestMainConfigShow:
     @pytest.mark.parametrize("additional_params", ([], ["--help"]))
     def test_config_show_help(
-        self, _m_resources, _logging, logging_error, additional_params, capsys
+        self,
+        _m_resources,
+        _logging,
+        logging_error,
+        additional_params,
+        capsys,
+        FakeConfig,
     ):
         """Show help for --help and absent positional param"""
         with pytest.raises(SystemExit):
             with mock.patch(
                 "sys.argv", ["/usr/bin/ua", "config"] + additional_params
             ):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
         out, err = capsys.readouterr()
         assert HELP_OUTPUT == out
         if additional_params == ["--help"]:
@@ -47,16 +57,20 @@ class TestMainConfigShow:
             ] == logging_error.call_args_list
 
     def test_config_show_error_on_invalid_subcommand(
-        self, _m_resources, _logging, _logging_error, capsys
+        self, _m_resources, _logging, _logging_error, capsys, FakeConfig
     ):
         """Exit 1 on invalid subcommands."""
         with pytest.raises(SystemExit):
             with mock.patch("sys.argv", ["/usr/bin/ua", "config", "invalid"]):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
         out, err = capsys.readouterr()
         assert "" == out
         expected_logs = [
-            "usage: ua config <command> [flags]",
+            "usage: pro config <command> [flags]",
             "argument : invalid choice: 'invalid' (choose from 'show', 'set',"
             " 'unset')",
         ]
@@ -101,8 +115,9 @@ ua_apt_https_proxy      None
 global_apt_http_proxy   http://global_apt_http_proxy
 global_apt_https_proxy  http://global_apt_https_proxy
 update_messaging_timer  None
-update_status_timer     None
 metering_timer          None
+apt_news                True
+apt_news_url            https://motd.ubuntu.com/aptnews.json
 """
                 == out
             )

@@ -1,4 +1,5 @@
 import logging
+import socket
 from typing import Any, Dict, List, Optional, Tuple
 
 from uaclient import (
@@ -7,6 +8,7 @@ from uaclient import (
     exceptions,
     messages,
     serviceclient,
+    system,
     util,
 )
 from uaclient.config import UAConfig
@@ -25,6 +27,10 @@ API_V1_AUTO_ATTACH_CLOUD_TOKEN = "/v1/clouds/{cloud_type}/token"
 API_V1_MACHINE_ACTIVITY = "/v1/contracts/{contract}/machine-activity/{machine}"
 API_V1_CONTRACT_INFORMATION = "/v1/contract"
 
+API_V1_MAGIC_ATTACH = "/v1/magic-attach"
+
+OVERRIDE_SELECTOR_WEIGHTS = {"series_overrides": 1, "series": 2, "cloud": 3}
+
 event = event_logger.get_event_logger()
 
 
@@ -33,6 +39,7 @@ class UAContractClient(serviceclient.UAServiceClient):
     cfg_url_base_attr = "contract_url"
     api_error_cls = exceptions.ContractAPIError
 
+    @util.retry(socket.timeout, retry_sleeps=[1, 2, 2])
     def request_contract_machine_attach(self, contract_token, machine_id=None):
         """Requests machine attach to the provided machine_id.
 
@@ -49,9 +56,9 @@ class UAContractClient(serviceclient.UAServiceClient):
         machine_token, _headers = self.request_url(
             API_V1_CONTEXT_MACHINE_TOKEN, data=data, headers=headers
         )
-        self.cfg.write_cache("machine-token", machine_token)
+        self.cfg.machine_token_file.write(machine_token)
 
-        util.get_machine_id.cache_clear()
+        system.get_machine_id.cache_clear()
         machine_id = machine_token.get("machineTokenInfo", {}).get(
             "machineId", data.get("machineId")
         )
@@ -61,14 +68,8 @@ class UAContractClient(serviceclient.UAServiceClient):
 
     def request_resources(self) -> Dict[str, Any]:
         """Requests list of entitlements available to this machine type."""
-        platform = util.get_platform_info()
-        query_params = {
-            "architecture": platform["arch"],
-            "series": platform["series"],
-            "kernel": platform["kernel"],
-        }
         resource_response, headers = self.request_url(
-            API_V1_RESOURCES, query_params=query_params
+            API_V1_RESOURCES, query_params=self._get_platform_basic_info()
         )
         return resource_response
 
@@ -82,6 +83,7 @@ class UAContractClient(serviceclient.UAServiceClient):
         )
         return response_data
 
+    @util.retry(socket.timeout, retry_sleeps=[1, 2, 2])
     def request_auto_attach_contract_token(
         self, *, instance: clouds.AutoAttachCloudInstance
     ):
@@ -91,12 +93,20 @@ class UAContractClient(serviceclient.UAServiceClient):
 
         @return: Dict of the JSON response containing the contract-token.
         """
-        response, _headers = self.request_url(
-            API_V1_AUTO_ATTACH_CLOUD_TOKEN.format(
-                cloud_type=instance.cloud_type
-            ),
-            data=instance.identity_doc,
-        )
+        try:
+            response, _headers = self.request_url(
+                API_V1_AUTO_ATTACH_CLOUD_TOKEN.format(
+                    cloud_type=instance.cloud_type
+                ),
+                data=instance.identity_doc,
+            )
+        except exceptions.ContractAPIError as e:
+            msg = e.api_error.get("message", "")
+            if msg:
+                logging.debug(msg)
+                raise exceptions.InvalidProImage(error_msg=msg)
+            raise e
+
         self.cfg.write_cache("contract-token", response)
         return response
 
@@ -117,7 +127,7 @@ class UAContractClient(serviceclient.UAServiceClient):
         @return: Dict of the JSON response containing entitlement accessInfo.
         """
         if not machine_id:
-            machine_id = util.get_machine_id(self.cfg)
+            machine_id = system.get_machine_id(self.cfg)
         headers = self.headers()
         headers.update({"Authorization": "Bearer {}".format(machine_token)})
         url = API_V1_TMPL_RESOURCE_MACHINE_ACCESS.format(
@@ -132,14 +142,16 @@ class UAContractClient(serviceclient.UAServiceClient):
         return resource_access
 
     def request_machine_token_update(
-        self, machine_token: str, contract_id: str, machine_id: str = None
+        self,
+        machine_token: str,
+        contract_id: str,
+        machine_id: Optional[str] = None,
     ) -> Dict:
         """Update existing machine-token for an attached machine."""
         return self._request_machine_token_update(
             machine_token=machine_token,
             contract_id=contract_id,
             machine_id=machine_id,
-            detach=False,
         )
 
     def report_machine_activity(self):
@@ -148,9 +160,9 @@ class UAContractClient(serviceclient.UAServiceClient):
         This will report to the contracts backend all the current
         enabled services in the system.
         """
-        contract_id = self.cfg.contract_id
+        contract_id = self.cfg.machine_token_file.contract_id
         machine_token = self.cfg.machine_token.get("machineToken")
-        machine_id = util.get_machine_id(self.cfg)
+        machine_id = system.get_machine_id(self.cfg)
 
         request_data = self._get_activity_info(machine_id)
         url = API_V1_MACHINE_ACTIVITY.format(
@@ -167,7 +179,7 @@ class UAContractClient(serviceclient.UAServiceClient):
         # `machine-token.json`
         if response:
 
-            machine_token = self.cfg.read_cache("machine-token")
+            machine_token = self.cfg.machine_token
             # The activity information received as a response here
             # will not provide the information inside an activityInfo
             # structure. However, this structure will be reflected when
@@ -175,7 +187,77 @@ class UAContractClient(serviceclient.UAServiceClient):
             # Because of that, we will store the response directly on
             # the activityInfo key
             machine_token["activityInfo"] = response
-            self.cfg.write_cache("machine-token", machine_token)
+            self.cfg.machine_token_file.write(machine_token)
+
+    def get_magic_attach_token_info(self, magic_token: str) -> Dict[str, Any]:
+        """Request magic attach token info.
+
+        When the magic token is registered, it will contain new fields
+        that will allow us to know that the attach process can proceed
+        """
+        headers = self.headers()
+        headers.update({"Authorization": "Bearer {}".format(magic_token)})
+
+        try:
+            response, _ = self.request_url(
+                API_V1_MAGIC_ATTACH, headers=headers
+            )
+        except exceptions.ContractAPIError as e:
+            if hasattr(e, "code"):
+                if e.code == 401:
+                    raise exceptions.MagicAttachTokenError()
+                elif e.code == 503:
+                    raise exceptions.MagicAttachUnavailable()
+            raise e
+        except exceptions.UrlError as e:
+            logging.exception(str(e))
+            raise exceptions.ConnectivityError()
+
+        return response
+
+    def new_magic_attach_token(self) -> Dict[str, Any]:
+        """Create a magic attach token for the user."""
+        headers = self.headers()
+
+        try:
+            response, _ = self.request_url(
+                API_V1_MAGIC_ATTACH,
+                headers=headers,
+                method="POST",
+            )
+        except exceptions.ContractAPIError as e:
+            if e.code == 503:
+                raise exceptions.MagicAttachUnavailable()
+            raise e
+        except exceptions.UrlError as e:
+            logging.exception(str(e))
+            raise exceptions.ConnectivityError()
+
+        return response
+
+    def revoke_magic_attach_token(self, magic_token: str):
+        """Revoke a magic attach token for the user."""
+        headers = self.headers()
+        headers.update({"Authorization": "Bearer {}".format(magic_token)})
+
+        try:
+            self.request_url(
+                API_V1_MAGIC_ATTACH,
+                headers=headers,
+                method="DELETE",
+            )
+        except exceptions.ContractAPIError as e:
+            if hasattr(e, "code"):
+                if e.code == 400:
+                    raise exceptions.MagicAttachTokenAlreadyActivated()
+                elif e.code == 401:
+                    raise exceptions.MagicAttachTokenError()
+                elif e.code == 503:
+                    raise exceptions.MagicAttachUnavailable()
+            raise e
+        except exceptions.UrlError as e:
+            logging.exception(str(e))
+            raise exceptions.ConnectivityError()
 
     def get_updated_contract_info(
         self,
@@ -198,10 +280,15 @@ class UAContractClient(serviceclient.UAServiceClient):
         headers = self.headers()
         headers.update({"Authorization": "Bearer {}".format(machine_token)})
         url = API_V1_TMPL_CONTEXT_MACHINE_TOKEN_RESOURCE.format(
-            contract=contract_id, machine=machine_id
+            contract=contract_id,
+            machine=machine_id,
         )
         response, headers = self.request_url(
-            url, method="GET", headers=headers
+            url,
+            method="GET",
+            headers=headers,
+            query_params=self._get_platform_basic_info(),
+            timeout=2,
         )
         if headers.get("expires"):
             response["expires"] = headers["expires"]
@@ -211,8 +298,7 @@ class UAContractClient(serviceclient.UAServiceClient):
         self,
         machine_token: str,
         contract_id: str,
-        machine_id: str = None,
-        detach: bool = False,
+        machine_id: Optional[str] = None,
     ) -> Dict:
         """Request machine token refresh from contract server.
 
@@ -221,8 +307,6 @@ class UAContractClient(serviceclient.UAServiceClient):
         @param contract_id: Unique contract id provided by contract service.
         @param machine_id: Optional unique system machine id. When absent,
             contents of /etc/machine-id will be used.
-        @param detach: Boolean set True if detaching this machine from the
-            active contract. Default is False.
 
         @return: Dict of the JSON response containing refreshed machine-token
         """
@@ -233,29 +317,32 @@ class UAContractClient(serviceclient.UAServiceClient):
         url = API_V1_TMPL_CONTEXT_MACHINE_TOKEN_RESOURCE.format(
             contract=contract_id, machine=data["machineId"]
         )
-        kwargs = {"headers": headers}
-        if detach:
-            kwargs["method"] = "DELETE"
-        else:
-            kwargs["method"] = "POST"
-            kwargs["data"] = data
-        response, headers = self.request_url(url, **kwargs)
+        response, headers = self.request_url(
+            url, headers=headers, method="POST", data=data
+        )
         if headers.get("expires"):
             response["expires"] = headers["expires"]
-        if not detach:
-            self.cfg.write_cache("machine-token", response)
-            util.get_machine_id.cache_clear()
-            machine_id = response.get("machineTokenInfo", {}).get(
-                "machineId", data.get("machineId")
-            )
-            self.cfg.write_cache("machine-id", machine_id)
+        machine_id = response.get("machineTokenInfo", {}).get(
+            "machineId", data.get("machineId")
+        )
         return response
+
+    def update_files_after_machine_token_update(
+        self, response: Dict[str, Any]
+    ):
+        self.cfg.machine_token_file.write(response)
+        system.get_machine_id.cache_clear()
+        data = self._get_platform_data(None)
+        machine_id = response.get("machineTokenInfo", {}).get(
+            "machineId", data.get("machineId")
+        )
+        self.cfg.write_cache("machine-id", machine_id)
 
     def _get_platform_data(self, machine_id):
         """Return a dict of platform-related data for contract requests"""
         if not machine_id:
-            machine_id = util.get_machine_id(self.cfg)
-        platform = util.get_platform_info()
+            machine_id = system.get_machine_id(self.cfg)
+        platform = system.get_platform_info()
         platform_os = platform.copy()
         arch = platform_os.pop("arch")
         return {
@@ -264,16 +351,25 @@ class UAContractClient(serviceclient.UAServiceClient):
             "os": platform_os,
         }
 
+    def _get_platform_basic_info(self):
+        """Return a dict of platform basic info for some contract requests"""
+        platform = system.get_platform_info()
+        return {
+            "architecture": platform["arch"],
+            "series": platform["series"],
+            "kernel": platform["kernel"],
+        }
+
     def _get_activity_info(self, machine_id: Optional[str] = None):
         """Return a dict of activity info data for contract requests"""
         from uaclient.entitlements import ENTITLEMENT_CLASSES
 
         if not machine_id:
-            machine_id = util.get_machine_id(self.cfg)
+            machine_id = system.get_machine_id(self.cfg)
 
         # If the activityID is null we should provide the endpoint
         # with the instance machine id as the activityID
-        activity_id = self.cfg.activity_id or machine_id
+        activity_id = self.cfg.machine_token_file.activity_id or machine_id
 
         enabled_services = [
             ent(self.cfg).name
@@ -283,7 +379,7 @@ class UAContractClient(serviceclient.UAServiceClient):
 
         return {
             "activityID": activity_id,
-            "activityToken": self.cfg.activity_token,
+            "activityToken": self.cfg.machine_token_file.activity_token,
             "resources": enabled_services,
         }
 
@@ -309,9 +405,19 @@ def process_entitlements_delta(
     :param series_overrides: Boolean set True if series overrides should be
         applied to the new_access dict.
     """
+    from uaclient.entitlements import entitlements_enable_order
+
     delta_error = False
     unexpected_error = False
-    for name, new_entitlement in sorted(new_entitlements.items()):
+
+    # We need to sort our entitlements because some of them
+    # depend on other service to be enable first.
+    for name in entitlements_enable_order(cfg):
+        try:
+            new_entitlement = new_entitlements[name]
+        except KeyError:
+            continue
+
         try:
             deltas, service_enabled = process_entitlement_delta(
                 cfg=cfg,
@@ -320,8 +426,6 @@ def process_entitlements_delta(
                 allow_enable=allow_enable,
                 series_overrides=series_overrides,
             )
-        except exceptions.EntitlementNotFoundError:
-            continue
         except exceptions.UserFacingError:
             delta_error = True
             event.service_failed(name)
@@ -382,7 +486,7 @@ def process_entitlement_delta(
     from uaclient.entitlements import entitlement_factory
 
     if series_overrides:
-        util.apply_contract_overrides(new_access)
+        apply_contract_overrides(new_access)
 
     deltas = util.get_dict_deltas(orig_access, new_access)
     ret = False
@@ -414,12 +518,8 @@ def _create_attach_forbidden_message(
     e: exceptions.ContractAPIError,
 ) -> messages.NamedMessage:
     msg = messages.ATTACH_EXPIRED_TOKEN
-    if (
-        hasattr(e, "api_errors")
-        and len(e.api_errors) > 0
-        and "info" in e.api_errors[0]
-    ):
-        info = e.api_errors[0]["info"]
+    if hasattr(e, "api_error") and "info" in e.api_error:
+        info = e.api_error["info"]
         contract_id = info["contractId"]
         reason = info["reason"]
         reason_msg = None
@@ -475,7 +575,7 @@ def request_updated_contract(
     :raise UrlError: On failure to contact the server
     """
     orig_token = cfg.machine_token
-    orig_entitlements = cfg.entitlements
+    orig_entitlements = cfg.machine_token_file.entitlements
     if orig_token and contract_token:
         msg = messages.UNEXPECTED_CONTRACT_TOKEN_ON_ATTACHED_MACHINE
         raise exceptions.UserFacingError(msg=msg.msg, msg_code=msg.name)
@@ -500,19 +600,20 @@ def request_updated_contract(
                 raise e
             with util.disable_log_to_console():
                 logging.exception(str(e))
-            raise exceptions.UserFacingError(
-                msg=messages.CONNECTIVITY_ERROR.msg,
-                msg_code=messages.CONNECTIVITY_ERROR.name,
-            )
+            raise exceptions.ConnectivityError()
     else:
         machine_token = orig_token["machineToken"]
         contract_id = orig_token["machineTokenInfo"]["contractInfo"]["id"]
-        contract_client.request_machine_token_update(
+        resp = contract_client.request_machine_token_update(
             machine_token=machine_token, contract_id=contract_id
         )
+        contract_client.update_files_after_machine_token_update(resp)
 
     process_entitlements_delta(
-        cfg, orig_entitlements, cfg.entitlements, allow_enable
+        cfg,
+        orig_entitlements,
+        cfg.machine_token_file.entitlements,
+        allow_enable,
     )
 
 
@@ -531,13 +632,16 @@ def get_contract_information(cfg: UAConfig, token: str) -> Dict[str, Any]:
 
 def is_contract_changed(cfg: UAConfig) -> bool:
     orig_token = cfg.machine_token
-    orig_entitlements = cfg.entitlements
+    orig_entitlements = cfg.machine_token_file.entitlements
     machine_token = orig_token.get("machineToken", "")
     contract_id = (
         orig_token.get("machineTokenInfo", {})
         .get("contractInfo", {})
-        .get("id", "")
+        .get("id", None)
     )
+    if not contract_id:
+        return False
+
     contract_client = UAContractClient(cfg)
     resp = contract_client.get_updated_contract_info(
         machine_token, contract_id
@@ -548,13 +652,15 @@ def is_contract_changed(cfg: UAConfig) -> bool:
         .get("effectiveTo", None)
     )
     new_expiry = (
-        util.parse_rfc3339_date(resp_expiry)
+        resp_expiry
         if resp_expiry
-        else cfg.contract_expiry_datetime
+        else cfg.machine_token_file.contract_expiry_datetime
     )
-    if cfg.contract_expiry_datetime != new_expiry:
+    if cfg.machine_token_file.contract_expiry_datetime != new_expiry:
         return True
-    curr_entitlements = cfg.get_entitlements_from_token(resp)
+    curr_entitlements = cfg.machine_token_file.get_entitlements_from_token(
+        resp
+    )
     for name, new_entitlement in sorted(curr_entitlements.items()):
         deltas = util.get_dict_deltas(
             orig_entitlements.get(name, {}), new_entitlement
@@ -562,3 +668,84 @@ def is_contract_changed(cfg: UAConfig) -> bool:
         if deltas:
             return True
     return False
+
+
+def _get_override_weight(
+    override_selector: Dict[str, str], selector_values: Dict[str, str]
+) -> int:
+    override_weight = 0
+    for selector, value in override_selector.items():
+        if (selector, value) not in selector_values.items():
+            return 0
+        override_weight += OVERRIDE_SELECTOR_WEIGHTS[selector]
+
+    return override_weight
+
+
+def _select_overrides(
+    entitlement: Dict[str, Any], series_name: str, cloud_type: str
+) -> Dict[int, Dict[str, Any]]:
+    overrides = {}
+
+    selector_values = {"series": series_name, "cloud": cloud_type}
+
+    series_overrides = entitlement.pop("series", {}).pop(series_name, {})
+    if series_overrides:
+        overrides[
+            OVERRIDE_SELECTOR_WEIGHTS["series_overrides"]
+        ] = series_overrides
+
+    general_overrides = entitlement.pop("overrides", [])
+    for override in general_overrides:
+        weight = _get_override_weight(
+            override.pop("selector"), selector_values
+        )
+        if weight:
+            overrides[weight] = override
+
+    return overrides
+
+
+def apply_contract_overrides(
+    orig_access: Dict[str, Any], series: Optional[str] = None
+) -> None:
+    """Apply series-specific overrides to an entitlement dict.
+
+    This function mutates orig_access dict by applying any series-overrides to
+    the top-level keys under 'entitlement'. The series-overrides are sparse
+    and intended to supplement existing top-level dict values. So, sub-keys
+    under the top-level directives, obligations and affordance sub-key values
+    will be preserved if unspecified in series-overrides.
+
+    To more clearly indicate that orig_access in memory has already had
+    the overrides applied, the 'series' key is also removed from the
+    orig_access dict.
+
+    :param orig_access: Dict with original entitlement access details
+    """
+    from uaclient.clouds.identity import get_cloud_type
+
+    if not all([isinstance(orig_access, dict), "entitlement" in orig_access]):
+        raise RuntimeError(
+            'Expected entitlement access dict. Missing "entitlement" key:'
+            " {}".format(orig_access)
+        )
+
+    series_name = (
+        system.get_platform_info()["series"] if series is None else series
+    )
+    cloud_type, _ = get_cloud_type()
+    orig_entitlement = orig_access.get("entitlement", {})
+
+    overrides = _select_overrides(orig_entitlement, series_name, cloud_type)
+
+    for _weight, overrides_to_apply in sorted(overrides.items()):
+        for key, value in overrides_to_apply.items():
+            current = orig_access["entitlement"].get(key)
+            if isinstance(current, dict):
+                # If the key already exists and is a dict,
+                # update that dict using the override
+                current.update(value)
+            else:
+                # Otherwise, replace it wholesale
+                orig_access["entitlement"][key] = value

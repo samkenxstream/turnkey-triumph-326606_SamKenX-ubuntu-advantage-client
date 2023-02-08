@@ -2,17 +2,16 @@
 This module is responsible for handling all events
 that must be raised to the user somehow. The main idea
 behind this module is to centralize all events that happens
-during the execution of UA commands and allows us to report
+during the execution of Pro commands and allows us to report
 those events in real time or through a machine-readable format.
 """
 
 import enum
 import json
-import os
 import sys
 from typing import Any, Dict, List, Optional, Set, Union  # noqa: F401
 
-from uaclient.defaults import CONFIG_FIELD_ENVVAR_ALLOWLIST
+import yaml
 
 JSON_SCHEMA_VERSION = "0.1"
 EventFieldErrorType = Optional[Union[str, Dict[str, str]]]
@@ -43,24 +42,19 @@ class EventLoggerMode(enum.Enum):
 
 
 def format_machine_readable_output(status: Dict[str, Any]) -> Dict[str, Any]:
+    from uaclient.util import get_pro_environment
+
     status["environment_vars"] = [
         {"name": name, "value": value}
-        for name, value in sorted(os.environ.items())
-        if name.lower() in CONFIG_FIELD_ENVVAR_ALLOWLIST
-        or name.startswith("UA_FEATURES")
-        or name == "UA_CONFIG_FILE"
+        for name, value in sorted(get_pro_environment().items())
     ]
-
-    if not status.get("simulated"):
-        available_services = [
-            service
-            for service in status.get("services", [])
-            if service.get("available", "yes") == "yes"
-        ]
-        status["services"] = available_services
 
     # We don't need the origin info in the json output
     status.pop("origin", "")
+
+    # In case there is an error during status and the services were
+    # not processed
+    status.setdefault("services", [])
 
     return status
 
@@ -216,7 +210,11 @@ class EventLogger:
             "needs_reboot": self._needs_reboot,
         }
 
-        print(json.dumps(response, sort_keys=True))
+        from uaclient.util import DatetimeAwareJSONEncoder
+
+        print(
+            json.dumps(response, cls=DatetimeAwareJSONEncoder, sort_keys=True)
+        )
 
     def _process_events_status(self):
         output = format_machine_readable_output(self._output_content)
@@ -233,8 +231,6 @@ class EventLogger:
                 )
             )
         elif self._event_logger_mode == EventLoggerMode.YAML:
-            import yaml
-
             print(yaml.dump(output, default_flow_style=False))
 
     def process_events(self) -> None:

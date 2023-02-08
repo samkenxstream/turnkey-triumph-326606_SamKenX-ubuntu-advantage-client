@@ -7,16 +7,17 @@ from uaclient.entitlements.entitlement_status import ApplicationStatus
 from uaclient.exceptions import NonRootUserError, UserFacingError
 
 HELP_OUTPUT = """\
-usage: ua set <key>=<value> [flags]
+usage: pro set <key>=<value> [flags]
 
-Set and apply Ubuntu Advantage configuration settings
+Set and apply Ubuntu Pro configuration settings
 
 positional arguments:
-  key_value_pair  key=value pair to configure for Ubuntu Advantage services.
-                  Key must be one of: http_proxy, https_proxy, apt_http_proxy,
+  key_value_pair  key=value pair to configure for Ubuntu Pro services. Key
+                  must be one of: http_proxy, https_proxy, apt_http_proxy,
                   apt_https_proxy, ua_apt_http_proxy, ua_apt_https_proxy,
                   global_apt_http_proxy, global_apt_https_proxy,
-                  update_messaging_timer, update_status_timer, metering_timer
+                  update_messaging_timer, metering_timer, apt_news,
+                  apt_news_url
 
 Flags:
   -h, --help      show this help message and exit
@@ -37,7 +38,7 @@ class TestMainConfigSet:
                 " apt_http_proxy, apt_https_proxy, ua_apt_http_proxy,"
                 " ua_apt_https_proxy, global_apt_http_proxy,"
                 " global_apt_https_proxy, update_messaging_timer,"
-                " update_status_timer, metering_timer",
+                " metering_timer",
             ),
             (
                 "http_proxys=",
@@ -45,7 +46,7 @@ class TestMainConfigSet:
                 " apt_http_proxy, apt_https_proxy, ua_apt_http_proxy,"
                 " ua_apt_https_proxy, global_apt_http_proxy,"
                 " global_apt_https_proxy, update_messaging_timer,"
-                " update_status_timer, metering_timer",
+                " metering_timer",
             ),
             (
                 "=value",
@@ -53,20 +54,31 @@ class TestMainConfigSet:
                 " apt_http_proxy, apt_https_proxy, ua_apt_http_proxy,"
                 " ua_apt_https_proxy, global_apt_http_proxy,"
                 " global_apt_https_proxy, update_messaging_timer,"
-                " update_status_timer, metering_timer",
+                " metering_timer",
             ),
         ),
     )
     @mock.patch("uaclient.cli.contract.get_available_resources")
     def test_set_error_with_help_on_invalid_key_value_pair(
-        self, _m_resources, _logging, _getuid, kv_pair, err_msg, capsys
+        self,
+        _m_resources,
+        _logging,
+        _getuid,
+        kv_pair,
+        err_msg,
+        capsys,
+        FakeConfig,
     ):
         """Exit 1 and print help on invalid key_value_pair input param."""
         with pytest.raises(SystemExit):
             with mock.patch(
                 "sys.argv", ["/usr/bin/ua", "config", "set", kv_pair]
             ):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
         out, err = capsys.readouterr()
         assert HELP_OUTPUT == out
         assert err_msg in err
@@ -79,7 +91,7 @@ class TestActionConfigSet:
     def test_set_error_on_non_root_user(
         self, _m_resources, getuid, _write_cfg, FakeConfig
     ):
-        """Root is required to run ua config set."""
+        """Root is required to run pro config set."""
         getuid.return_value = 1
         args = mock.MagicMock(key_value_pair="something=1")
         cfg = FakeConfig()
@@ -300,7 +312,7 @@ class TestActionConfigSet:
             ] == configure_apt_proxy.call_args_list
             assert (
                 messages.WARNING_APT_PROXY_OVERWRITE.format(
-                    current_proxy="global apt", previous_proxy="ua scoped apt"
+                    current_proxy="global apt", previous_proxy="pro scoped apt"
                 )
                 in out
             )
@@ -411,7 +423,7 @@ class TestActionConfigSet:
             ] == configure_apt_proxy.call_args_list
             assert (
                 messages.WARNING_APT_PROXY_OVERWRITE.format(
-                    current_proxy="ua scoped apt", previous_proxy="global apt"
+                    current_proxy="pro scoped apt", previous_proxy="global apt"
                 )
                 in out
             )

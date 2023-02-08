@@ -1,4 +1,6 @@
 import copy
+import datetime
+import json
 import textwrap
 from collections import defaultdict
 
@@ -11,6 +13,7 @@ from uaclient.entitlements.entitlement_status import (
     ApplicabilityStatus,
     UserFacingStatus,
 )
+from uaclient.files.notices import Notice
 from uaclient.messages import (
     ENABLE_REBOOT_REQUIRED_TMPL,
     FAIL_X,
@@ -18,6 +21,9 @@ from uaclient.messages import (
     PROMPT_ENTER_TOKEN,
     PROMPT_EXPIRED_ENTER_TOKEN,
     SECURITY_APT_NON_ROOT,
+    SECURITY_DRY_RUN_UA_EXPIRED_SUBSCRIPTION,
+    SECURITY_DRY_RUN_UA_NOT_ATTACHED,
+    SECURITY_DRY_RUN_UA_SERVICE_NOT_ENABLED,
     SECURITY_ISSUE_NOT_RESOLVED,
     SECURITY_SERVICE_DISABLED,
     SECURITY_UA_SERVICE_NOT_ENABLED,
@@ -36,6 +42,9 @@ from uaclient.security import (
     CVEPackageStatus,
     FixStatus,
     UASecurityClient,
+    _check_attached,
+    _check_subscription_for_required_service,
+    _check_subscription_is_expired,
     fix_security_issue_id,
     get_cve_affected_source_packages_status,
     get_related_usns,
@@ -45,7 +54,6 @@ from uaclient.security import (
     prompt_for_affected_packages,
     query_installed_source_pkg_versions,
     upgrade_packages_and_attach,
-    version_cmp_le,
 )
 from uaclient.status import colorize_commands
 
@@ -215,7 +223,7 @@ class TestGetCVEAffectedPackageStatus:
             ("focal", {"samba": "1000"}, {}),
         ),
     )
-    @mock.patch("uaclient.security.util.get_platform_info")
+    @mock.patch("uaclient.security.system.get_platform_info")
     def test_affected_packages_status_filters_by_installed_pkgs_and_series(
         self,
         get_platform_info,
@@ -236,23 +244,6 @@ class TestGetCVEAffectedPackageStatus:
             assert expected_status == package_status.response
         else:
             assert expected_status == affected_packages
-
-
-class TestVersionCmpLe:
-    @pytest.mark.parametrize(
-        "ver1,ver2,is_lessorequal",
-        (
-            ("1.0", "2.0", True),
-            ("2.0", "2.0", True),
-            ("2.1~18.04.1", "2.1", True),
-            ("2.1", "2.1~18.04.1", False),
-            ("2.1", "2.0", False),
-        ),
-    )
-    def test_version_cmp_le(self, ver1, ver2, is_lessorequal, _subp):
-        """version_cmp_le returns True when ver1 less than or equal to ver2."""
-        with mock.patch("uaclient.util._subp", side_effect=_subp):
-            assert is_lessorequal is version_cmp_le(ver1, ver2)
 
 
 class TestCVE:
@@ -317,7 +308,7 @@ class TestCVE:
             textwrap.dedent(
                 """\
                 CVE-2020-1472: Samba vulnerability
-                https://ubuntu.com/security/CVE-2020-1472"""
+                 - https://ubuntu.com/security/CVE-2020-1472"""
             )
             == cve.get_url_header()
         )
@@ -457,7 +448,7 @@ class TestUSN:
             ("series-example-3", {}),
         ),
     )
-    @mock.patch("uaclient.util.get_platform_info")
+    @mock.patch("uaclient.system.get_platform_info")
     def test_release_packages_returns_source_and_binary_pkgs_for_series(
         self, get_platform_info, series, expected, FakeConfig
     ):
@@ -484,7 +475,7 @@ class TestUSN:
             ),
         ),
     )
-    @mock.patch("uaclient.util.get_platform_info")
+    @mock.patch("uaclient.system.get_platform_info")
     def test_release_packages_errors_on_sparse_source_url(
         self, get_platform_info, source_link, error_msg, FakeConfig
     ):
@@ -515,8 +506,8 @@ class TestUSN:
                     """\
                     USN-4510-2: Samba vulnerability
                     Found CVEs:
-                    https://ubuntu.com/security/CVE-2020-1473
-                    https://ubuntu.com/security/CVE-2020-1472"""
+                     - https://ubuntu.com/security/CVE-2020-1473
+                     - https://ubuntu.com/security/CVE-2020-1472"""
                 ),
             ),
             (
@@ -527,22 +518,22 @@ class TestUSN:
                 """\
 USN-4510-2: Samba vulnerability
 Found CVEs:
-https://ubuntu.com/security/CVE-2020-1473
-https://ubuntu.com/security/CVE-2020-1472
-https://ubuntu.com/security/CVE-2020-1473
-https://ubuntu.com/security/CVE-2020-1472
-https://ubuntu.com/security/CVE-2020-1473
-https://ubuntu.com/security/CVE-2020-1472
-https://ubuntu.com/security/CVE-2020-1473
-https://ubuntu.com/security/CVE-2020-1472
-https://ubuntu.com/security/CVE-2020-1473
-https://ubuntu.com/security/CVE-2020-1472
-https://ubuntu.com/security/CVE-2020-1473
-https://ubuntu.com/security/CVE-2020-1472
-https://ubuntu.com/security/CVE-2020-1473
-https://ubuntu.com/security/CVE-2020-1472
-https://ubuntu.com/security/CVE-2020-1473
-https://ubuntu.com/security/CVE-2020-1472""",
+ - https://ubuntu.com/security/CVE-2020-1473
+ - https://ubuntu.com/security/CVE-2020-1472
+ - https://ubuntu.com/security/CVE-2020-1473
+ - https://ubuntu.com/security/CVE-2020-1472
+ - https://ubuntu.com/security/CVE-2020-1473
+ - https://ubuntu.com/security/CVE-2020-1472
+ - https://ubuntu.com/security/CVE-2020-1473
+ - https://ubuntu.com/security/CVE-2020-1472
+ - https://ubuntu.com/security/CVE-2020-1473
+ - https://ubuntu.com/security/CVE-2020-1472
+ - https://ubuntu.com/security/CVE-2020-1473
+ - https://ubuntu.com/security/CVE-2020-1472
+ - https://ubuntu.com/security/CVE-2020-1473
+ - https://ubuntu.com/security/CVE-2020-1472
+ - https://ubuntu.com/security/CVE-2020-1473
+ - https://ubuntu.com/security/CVE-2020-1472""",
             ),
             (
                 SAMPLE_USN_RESPONSE_NO_CVES,
@@ -550,7 +541,7 @@ https://ubuntu.com/security/CVE-2020-1472""",
                     """\
                     USN-4038-3: USN vulnerability
                     Found Launchpad bugs:
-                    https://launchpad.net/bugs/1834494"""
+                     - https://launchpad.net/bugs/1834494"""
                 ),
             ),
         ),
@@ -605,12 +596,12 @@ class TestCVEPackageStatus:
     @pytest.mark.parametrize(
         "pocket,description,expected",
         (
-            ("esm-infra", "1.2", "UA Infra"),
-            ("esm-apps", "1.2", "UA Apps"),
+            ("esm-infra", "1.2", "Ubuntu Pro: ESM Infra"),
+            ("esm-apps", "1.2", "Ubuntu Pro: ESM Apps"),
             ("updates", "1.2esm", "Ubuntu standard updates"),
             ("security", "1.2esm", "Ubuntu standard updates"),
             (None, "1.2", "Ubuntu standard updates"),
-            (None, "1.2esm", "UA Infra"),
+            (None, "1.2esm", "Ubuntu Pro: ESM Infra"),
         ),
     )
     def test_pocket_source_from_response(self, pocket, description, expected):
@@ -630,7 +621,7 @@ class TestCVEPackageStatus:
         ),
     )
     def test_requires_ua_from_response(self, pocket, description, expected):
-        """requires_ua is derived from response pocket and description."""
+        """requires_pro is derived from response pocket and description."""
         cve_response = {"pocket": pocket, "description": description}
         pkg_status = CVEPackageStatus(cve_response=cve_response)
         assert expected is pkg_status.requires_ua
@@ -656,7 +647,11 @@ class TestCVEPackageStatus:
                 "A fix is coming soon. Try again tomorrow.",
             ),
             ("ignored", "esm-infra", "Sorry, no fix is available."),
-            ("released", "esm-infra", "A fix is available in UA Infra."),
+            (
+                "released",
+                "esm-infra",
+                "A fix is available in Ubuntu Pro: ESM Infra.",
+            ),
             (
                 "released",
                 "security",
@@ -897,8 +892,8 @@ class TestQueryInstalledPkgSources:
             ),
         ),
     )
-    @mock.patch("uaclient.security.util.subp")
-    @mock.patch("uaclient.util.get_platform_info")
+    @mock.patch("uaclient.security.system.subp")
+    @mock.patch("uaclient.system.get_platform_info")
     def test_result_keyed_by_source_package_name(
         self, get_platform_info, subp, dpkg_out, results
     ):
@@ -985,6 +980,7 @@ class TestPromptForAffectedPackages:
                     affected_pkg_status=affected_pkg_status,
                     installed_packages=installed_packages,
                     usn_released_pkgs=usn_released_pkgs,
+                    dry_run=False,
                 )
         assert (
             "Error: USN-### metadata defines no fixed version for sl.\n"
@@ -1007,6 +1003,7 @@ class TestPromptForAffectedPackages:
                 textwrap.dedent(
                     """\
                     No affected source packages are installed.
+
                     {check} USN-### does not affect your system.
                     """.format(
                         check=OKGREEN_CHECK  # noqa: E126
@@ -1025,6 +1022,7 @@ class TestPromptForAffectedPackages:
                     (1/1) slsrc:
                     A fix is available in Ubuntu standard updates.
                     The update is already installed.
+
                     {check} USN-### is resolved.
                     """.format(
                         check=OKGREEN_CHECK  # noqa: E126
@@ -1047,7 +1045,7 @@ class TestPromptForAffectedPackages:
                 + colorize_commands(
                     [["apt update && apt install --only-upgrade" " -y sl"]]
                 )
-                + "\n"
+                + "\n\n"
                 + "{check} USN-### is resolved.\n".format(check=OKGREEN_CHECK),
                 FixStatus.SYSTEM_NON_VULNERABLE,
             ),
@@ -1073,6 +1071,7 @@ class TestPromptForAffectedPackages:
                                 ]
                             ]
                         ),
+                        "",
                         "{check} USN-### is resolved.\n".format(
                             check=OKGREEN_CHECK
                         ),
@@ -1089,7 +1088,7 @@ class TestPromptForAffectedPackages:
                     """\
                     1 affected source package is installed: slsrc
                     (1/1) slsrc:
-                    A fix is available in UA Infra.
+                    A fix is available in Ubuntu Pro: ESM Infra.
                     """
                 )
                 + "\n".join(
@@ -1111,7 +1110,7 @@ class TestPromptForAffectedPackages:
                     """\
                     1 affected source package is installed: slsrc
                     (1/1) slsrc:
-                    A fix is available in UA Infra.
+                    A fix is available in Ubuntu Pro: ESM Infra.
                     """
                 )
                 + "\n".join(
@@ -1149,7 +1148,7 @@ class TestPromptForAffectedPackages:
                 + textwrap.dedent(
                     """\
                     (2/2) slsrc:
-                    A fix is available in UA Apps.
+                    A fix is available in Ubuntu Pro: ESM Apps.
                     """
                 )
                 + "\n".join(
@@ -1158,7 +1157,7 @@ class TestPromptForAffectedPackages:
                         SECURITY_UPDATE_NOT_INSTALLED_SUBSCRIPTION,
                     ]
                 )
-                + "\n"
+                + "\n\n"
                 + "1 package is still affected: slsrc",
                 FixStatus.SYSTEM_STILL_VULNERABLE,
             ),
@@ -1238,7 +1237,7 @@ class TestPromptForAffectedPackages:
                 + textwrap.dedent(
                     """\
                     (12/15, 13/15) pkg12, pkg13:
-                    A fix is available in UA Infra.
+                    A fix is available in Ubuntu Pro: ESM Infra.
                     """
                 )
                 + "\n".join(
@@ -1247,7 +1246,7 @@ class TestPromptForAffectedPackages:
                         SECURITY_UPDATE_NOT_INSTALLED_SUBSCRIPTION,
                     ]
                 )
-                + "\n"
+                + "\n\n"
                 + "13 packages are still affected: {}".format(
                     (
                         "pkg1, pkg12, pkg13, pkg14, pkg15, pkg2, pkg3,\n"
@@ -1287,6 +1286,7 @@ class TestPromptForAffectedPackages:
                     "pkg1, pkg2, pkg3, pkg4, pkg5, pkg6,\n"
                     "    pkg7, pkg8, pkg9"
                 )
+                + "\n"
                 + "9 packages are still affected: {}".format(
                     "pkg1, pkg2, pkg3, pkg4, pkg5, pkg6, pkg7, pkg8,\n"
                     "    pkg9"
@@ -1354,14 +1354,14 @@ A fix is available in Ubuntu standard updates.\n"""
                         ]
                     ]
                 )
-                + "\n"
+                + "\n\n"
                 + "{check} USN-### is resolved.\n".format(check=OKGREEN_CHECK),
                 FixStatus.SYSTEM_NON_VULNERABLE,
             ),
         ),
     )
     @mock.patch("uaclient.entitlements.base.UAEntitlement.user_facing_status")
-    @mock.patch("uaclient.util.should_reboot", return_value=False)
+    @mock.patch("uaclient.system.should_reboot", return_value=False)
     @mock.patch("os.getuid", return_value=0)
     @mock.patch("uaclient.apt.run_apt_command", return_value="")
     @mock.patch("uaclient.security.get_cloud_type")
@@ -1388,7 +1388,7 @@ A fix is available in Ubuntu standard updates.\n"""
         get_cloud_type.return_value = cloud_type
         m_user_facing_status.return_value = (UserFacingStatus.INACTIVE, "")
         cfg = FakeConfig()
-        with mock.patch("uaclient.util._subp", side_effect=_subp):
+        with mock.patch("uaclient.system._subp", side_effect=_subp):
             with mock.patch("uaclient.util.sys") as m_sys:
                 m_stdout = mock.MagicMock()
                 type(m_sys).stdout = m_stdout
@@ -1401,6 +1401,7 @@ A fix is available in Ubuntu standard updates.\n"""
                     affected_pkg_status=affected_pkg_status,
                     installed_packages=installed_packages,
                     usn_released_pkgs=usn_released_pkgs,
+                    dry_run=False,
                 )
                 assert expected_ret == actual_ret
         out, err = capsys.readouterr()
@@ -1441,14 +1442,14 @@ A fix is available in Ubuntu standard updates.\n"""
                 + textwrap.dedent(
                     """\
                     (2/3) pkg3:
-                    A fix is available in UA Infra.
+                    A fix is available in Ubuntu Pro: ESM Infra.
                     """
                 )
                 + SECURITY_UPDATE_NOT_INSTALLED_SUBSCRIPTION
                 + "\n"
                 + PROMPT_ENTER_TOKEN
                 + "\n"
-                + colorize_commands([["ua attach token"]])
+                + colorize_commands([["pro attach token"]])
                 + "\n"
                 + colorize_commands(
                     [["apt update && apt install --only-upgrade" " -y pkg3"]]
@@ -1457,19 +1458,19 @@ A fix is available in Ubuntu standard updates.\n"""
                 + textwrap.dedent(
                     """\
                     (3/3) pkg1:
-                    A fix is available in UA Apps.
+                    A fix is available in Ubuntu Pro: ESM Apps.
                     """
                 )
                 + colorize_commands(
                     [["apt update && apt install --only-upgrade" " -y pkg1"]]
                 )
-                + "\n"
+                + "\n\n"
                 + "{check} USN-### is resolved.\n".format(check=OKGREEN_CHECK),
             ),
         ),
     )
     @mock.patch("uaclient.util.is_config_value_true", return_value=True)
-    @mock.patch("uaclient.util.should_reboot", return_value=False)
+    @mock.patch("uaclient.system.should_reboot", return_value=False)
     @mock.patch("uaclient.security._check_subscription_is_expired")
     @mock.patch("uaclient.security._check_subscription_for_required_service")
     @mock.patch("uaclient.cli.action_attach")
@@ -1509,7 +1510,7 @@ A fix is available in Ubuntu standard updates.\n"""
         m_action_attach.side_effect = fake_attach
 
         cfg = FakeConfig()
-        with mock.patch("uaclient.util._subp", side_effect=_subp):
+        with mock.patch("uaclient.system._subp", side_effect=_subp):
             with mock.patch("uaclient.util.sys") as m_sys:
                 m_stdout = mock.MagicMock()
                 type(m_sys).stdout = m_stdout
@@ -1522,6 +1523,7 @@ A fix is available in Ubuntu standard updates.\n"""
                     affected_pkg_status=affected_pkg_status,
                     installed_packages=installed_packages,
                     usn_released_pkgs=usn_released_pkgs,
+                    dry_run=False,
                 )
         out, err = capsys.readouterr()
         assert expected in out
@@ -1554,13 +1556,14 @@ A fix is available in Ubuntu standard updates.\n"""
                     A fix is available in Ubuntu standard updates.
                     """
                 )
+                + "\n"
                 + "3 packages are still affected: pkg1, pkg2, pkg3"
                 + "\n"
                 + "{check} USN-### is not resolved.\n".format(check=FAIL_X),
             ),
         ),
     )
-    @mock.patch("uaclient.util.should_reboot", return_value=False)
+    @mock.patch("uaclient.system.should_reboot", return_value=False)
     @mock.patch("uaclient.security.upgrade_packages_and_attach")
     def test_messages_for_affected_packages_when_fix_fail(
         self,
@@ -1577,7 +1580,7 @@ A fix is available in Ubuntu standard updates.\n"""
         m_upgrade_packages.return_value = False
 
         cfg = FakeConfig()
-        with mock.patch("uaclient.util._subp", side_effect=_subp):
+        with mock.patch("uaclient.system._subp", side_effect=_subp):
             with mock.patch("uaclient.util.sys") as m_sys:
                 m_stdout = mock.MagicMock()
                 type(m_sys).stdout = m_stdout
@@ -1590,6 +1593,7 @@ A fix is available in Ubuntu standard updates.\n"""
                     affected_pkg_status=affected_pkg_status,
                     installed_packages=installed_packages,
                     usn_released_pkgs=usn_released_pkgs,
+                    dry_run=False,
                 )
         out, err = capsys.readouterr()
         assert expected in out
@@ -1614,17 +1618,17 @@ A fix is available in Ubuntu standard updates.\n"""
                     """\
                     1 affected source package is installed: pkg1
                     (1/1) pkg1:
-                    A fix is available in UA Infra.
+                    A fix is available in Ubuntu Pro: ESM Infra.
                     """
                 )
                 + SECURITY_UPDATE_NOT_INSTALLED_SUBSCRIPTION
                 + "\n"
                 + PROMPT_ENTER_TOKEN
                 + "\n"
-                + colorize_commands([["ua attach token"]])
+                + colorize_commands([["pro attach token"]])
                 + "\n"
                 + SECURITY_UA_SERVICE_NOT_ENTITLED.format(service="esm-infra")
-                + "\n"
+                + "\n\n"
                 + "1 package is still affected: pkg1"
                 + "\n"
                 + "{check} USN-### is not resolved.\n".format(check=FAIL_X),
@@ -1632,7 +1636,7 @@ A fix is available in Ubuntu standard updates.\n"""
         ),
     )
     @mock.patch("uaclient.util.is_config_value_true", return_value=True)
-    @mock.patch("uaclient.util.should_reboot")
+    @mock.patch("uaclient.system.should_reboot")
     @mock.patch("uaclient.cli.action_attach")
     @mock.patch("builtins.input", return_value="token")
     @mock.patch("os.getuid", return_value=0)
@@ -1682,7 +1686,7 @@ A fix is available in Ubuntu standard updates.\n"""
             "uaclient.security.entitlement_factory",
             return_value=m_entitlement_cls,
         ):
-            with mock.patch("uaclient.util._subp", side_effect=_subp):
+            with mock.patch("uaclient.system._subp", side_effect=_subp):
                 with mock.patch("uaclient.util.sys") as m_sys:
                     m_stdout = mock.MagicMock()
                     type(m_sys).stdout = m_stdout
@@ -1695,6 +1699,7 @@ A fix is available in Ubuntu standard updates.\n"""
                         affected_pkg_status=affected_pkg_status,
                         installed_packages=installed_packages,
                         usn_released_pkgs=usn_released_pkgs,
+                        dry_run=False,
                     )
         out, err = capsys.readouterr()
         assert expected in out
@@ -1710,24 +1715,24 @@ A fix is available in Ubuntu standard updates.\n"""
                     """\
                     1 affected source package is installed: pkg1
                     (1/1) pkg1:
-                    A fix is available in UA Infra.
+                    A fix is available in Ubuntu Pro: ESM Infra.
                     """
                 )
                 + SECURITY_SERVICE_DISABLED.format(service="esm-infra")
                 + "\n"
-                + colorize_commands([["ua enable esm-infra"]])
+                + colorize_commands([["pro enable esm-infra"]])
                 + "\n"
                 + colorize_commands(
                     [["apt update && apt install --only-upgrade" " -y pkg1"]]
                 )
-                + "\n"
+                + "\n\n"
                 + "{check} USN-### is resolved.\n".format(check=OKGREEN_CHECK),
             ),
         ),
     )
     @mock.patch("uaclient.security._is_pocket_used_by_beta_service")
     @mock.patch("uaclient.util.is_config_value_true", return_value=False)
-    @mock.patch("uaclient.util.should_reboot", return_value=False)
+    @mock.patch("uaclient.system.should_reboot", return_value=False)
     @mock.patch("uaclient.security._check_subscription_is_expired")
     @mock.patch("uaclient.cli.action_enable", return_value=0)
     @mock.patch("uaclient.apt.run_apt_command", return_value="")
@@ -1771,13 +1776,12 @@ A fix is available in Ubuntu standard updates.\n"""
             return_value="esm-infra"
         )
 
-        cfg = FakeConfig()
-        cfg.for_attached_machine()
+        cfg = FakeConfig().for_attached_machine()
         with mock.patch(
             "uaclient.entitlements.entitlement_factory",
             return_value=m_entitlement_cls,
         ):
-            with mock.patch("uaclient.util._subp", side_effect=_subp):
+            with mock.patch("uaclient.system._subp", side_effect=_subp):
                 with mock.patch("uaclient.util.sys") as m_sys:
                     m_stdout = mock.MagicMock()
                     type(m_sys).stdout = m_stdout
@@ -1790,6 +1794,7 @@ A fix is available in Ubuntu standard updates.\n"""
                         affected_pkg_status=affected_pkg_status,
                         installed_packages=installed_packages,
                         usn_released_pkgs=usn_released_pkgs,
+                        dry_run=False,
                     )
         out, err = capsys.readouterr()
         assert expected in out
@@ -1805,13 +1810,13 @@ A fix is available in Ubuntu standard updates.\n"""
                     """\
                     1 affected source package is installed: pkg1
                     (1/1) pkg1:
-                    A fix is available in UA Infra.
+                    A fix is available in Ubuntu Pro: ESM Infra.
                     """
                 )
                 + SECURITY_SERVICE_DISABLED.format(service="esm-infra")
                 + "\n"
                 + SECURITY_UA_SERVICE_NOT_ENABLED.format(service="esm-infra")
-                + "\n"
+                + "\n\n"
                 + "1 package is still affected: pkg1"
                 + "\n"
                 + "{check} USN-### is not resolved.\n".format(check=FAIL_X),
@@ -1820,7 +1825,7 @@ A fix is available in Ubuntu standard updates.\n"""
     )
     @mock.patch("uaclient.security._is_pocket_used_by_beta_service")
     @mock.patch("uaclient.util.is_config_value_true", return_value=False)
-    @mock.patch("uaclient.util.should_reboot", return_value=False)
+    @mock.patch("uaclient.system.should_reboot", return_value=False)
     @mock.patch("uaclient.security._check_subscription_is_expired")
     @mock.patch("os.getuid", return_value=0)
     @mock.patch("uaclient.security.get_cloud_type")
@@ -1860,13 +1865,12 @@ A fix is available in Ubuntu standard updates.\n"""
             return_value="esm-infra"
         )
 
-        cfg = FakeConfig()
-        cfg.for_attached_machine()
+        cfg = FakeConfig().for_attached_machine()
         with mock.patch(
             "uaclient.entitlements.entitlement_factory",
             return_value=m_entitlement_cls,
         ):
-            with mock.patch("uaclient.util._subp", side_effect=_subp):
+            with mock.patch("uaclient.system._subp", side_effect=_subp):
                 with mock.patch("uaclient.util.sys") as m_sys:
                     m_stdout = mock.MagicMock()
                     type(m_sys).stdout = m_stdout
@@ -1879,6 +1883,7 @@ A fix is available in Ubuntu standard updates.\n"""
                         affected_pkg_status=affected_pkg_status,
                         installed_packages=installed_packages,
                         usn_released_pkgs=usn_released_pkgs,
+                        dry_run=False,
                     )
         out, err = capsys.readouterr()
         assert expected in out
@@ -1890,31 +1895,32 @@ A fix is available in Ubuntu standard updates.\n"""
                 {"pkg1": CVEPackageStatus(CVE_PKG_STATUS_RELEASED_ESM_INFRA)},
                 {"pkg1": {"pkg1": "1.8"}},
                 {"pkg1": {"pkg1": {"version": "2.0"}}},
-                textwrap.dedent(
+                "\n"
+                + textwrap.dedent(
                     """\
                     1 affected source package is installed: pkg1
                     (1/1) pkg1:
-                    A fix is available in UA Infra.
+                    A fix is available in Ubuntu Pro: ESM Infra.
                     """
                 )
                 + SECURITY_UPDATE_NOT_INSTALLED_EXPIRED
                 + "\n"
                 + PROMPT_EXPIRED_ENTER_TOKEN
                 + "\n"
-                + colorize_commands([["ua detach"]])
+                + colorize_commands([["pro detach"]])
                 + "\n"
-                + colorize_commands([["ua attach token"]])
+                + colorize_commands([["pro attach token"]])
                 + "\n"
                 + colorize_commands(
                     [["apt update && apt install --only-upgrade" " -y pkg1"]]
                 )
-                + "\n"
+                + "\n\n"
                 + "{check} USN-### is resolved.\n".format(check=OKGREEN_CHECK),
             ),
         ),
     )
     @mock.patch("uaclient.security._is_pocket_used_by_beta_service")
-    @mock.patch("uaclient.util.should_reboot", return_value=False)
+    @mock.patch("uaclient.system.should_reboot", return_value=False)
     @mock.patch("uaclient.apt.run_apt_command", return_value="")
     @mock.patch("uaclient.cli.action_attach")
     @mock.patch("builtins.input", return_value="token")
@@ -1948,15 +1954,13 @@ A fix is available in Ubuntu standard updates.\n"""
         m_cli_attach.return_value = 0
         m_is_pocket_beta_service.return_value = False
 
-        cfg = FakeConfig()
-        cfg.for_attached_machine(
-            machine_token={
-                "machineTokenInfo": {
-                    "contractInfo": {"effectiveTo": "1999-12-01T00:00:00Z"}
-                }
-            }
+        cfg = FakeConfig().for_attached_machine(
+            status_cache={
+                "expires": "1999-12-01T00:00:00Z",
+                "attached": True,
+            },
         )
-        with mock.patch("uaclient.util._subp", side_effect=_subp):
+        with mock.patch("uaclient.system._subp", side_effect=_subp):
             with mock.patch("uaclient.util.sys") as m_sys:
                 m_stdout = mock.MagicMock()
                 type(m_sys).stdout = m_stdout
@@ -1969,10 +1973,11 @@ A fix is available in Ubuntu standard updates.\n"""
                     affected_pkg_status=affected_pkg_status,
                     installed_packages=installed_packages,
                     usn_released_pkgs=usn_released_pkgs,
+                    dry_run=False,
                 )
 
         out, err = capsys.readouterr()
-        assert expected in out
+        assert expected == out
 
     @pytest.mark.parametrize(
         "affected_pkg_status,installed_packages,usn_released_pkgs,expected",
@@ -1985,11 +1990,11 @@ A fix is available in Ubuntu standard updates.\n"""
                     """\
                     1 affected source package is installed: pkg1
                     (1/1) pkg1:
-                    A fix is available in UA Infra.
+                    A fix is available in Ubuntu Pro: ESM Infra.
                     """
                 )
                 + SECURITY_UPDATE_NOT_INSTALLED_EXPIRED
-                + "\n"
+                + "\n\n"
                 + "1 package is still affected: pkg1"
                 + "\n"
                 + "{check} USN-### is not resolved.\n".format(check=FAIL_X),
@@ -1997,7 +2002,7 @@ A fix is available in Ubuntu standard updates.\n"""
         ),
     )
     @mock.patch("uaclient.security._is_pocket_used_by_beta_service")
-    @mock.patch("uaclient.util.should_reboot", return_value=False)
+    @mock.patch("uaclient.system.should_reboot", return_value=False)
     @mock.patch("os.getuid", return_value=0)
     @mock.patch("uaclient.security.get_cloud_type")
     @mock.patch("uaclient.security.util.prompt_choices", return_value="c")
@@ -2019,16 +2024,14 @@ A fix is available in Ubuntu standard updates.\n"""
         m_get_cloud_type.return_value = ("cloud", None)
         m_is_pocket_beta_service.return_value = False
 
-        cfg = FakeConfig()
-        cfg.for_attached_machine(
-            machine_token={
-                "machineTokenInfo": {
-                    "contractInfo": {"effectiveTo": "1999-12-01T00:00:00Z"}
-                }
-            }
+        cfg = FakeConfig().for_attached_machine(
+            status_cache={
+                "expires": "1999-12-01T00:00:00Z",
+                "attached": True,
+            },
         )
 
-        with mock.patch("uaclient.util._subp", side_effect=_subp):
+        with mock.patch("uaclient.system._subp", side_effect=_subp):
             with mock.patch("uaclient.util.sys") as m_sys:
                 m_stdout = mock.MagicMock()
                 type(m_sys).stdout = m_stdout
@@ -2041,6 +2044,7 @@ A fix is available in Ubuntu standard updates.\n"""
                     affected_pkg_status=affected_pkg_status,
                     installed_packages=installed_packages,
                     usn_released_pkgs=usn_released_pkgs,
+                    dry_run=False,
                 )
 
         out, err = capsys.readouterr()
@@ -2063,7 +2067,7 @@ A fix is available in Ubuntu standard updates.\n"""
                 + colorize_commands(
                     [["apt update && apt install --only-upgrade" " -y pkg1"]]
                 )
-                + "\n"
+                + "\n\n"
                 + "A reboot is required to complete fix operation."
                 + "\n"
                 + "{check} USN-### is not resolved.\n".format(check=FAIL_X),
@@ -2071,8 +2075,8 @@ A fix is available in Ubuntu standard updates.\n"""
             ),
         ),
     )
-    @mock.patch("uaclient.config.UAConfig.add_notice")
-    @mock.patch("uaclient.util.should_reboot", return_value=True)
+    @mock.patch("uaclient.files.notices.NoticesManager.add")
+    @mock.patch("uaclient.system.should_reboot", return_value=True)
     @mock.patch("uaclient.apt.run_apt_command", return_value="")
     @mock.patch("os.getuid", return_value=0)
     @mock.patch("uaclient.security.get_cloud_type")
@@ -2095,7 +2099,7 @@ A fix is available in Ubuntu standard updates.\n"""
         m_get_cloud_type.return_value = ("cloud", None)
 
         cfg = FakeConfig()
-        with mock.patch("uaclient.util._subp", side_effect=_subp):
+        with mock.patch("uaclient.system._subp", side_effect=_subp):
             with mock.patch("uaclient.util.sys") as m_sys:
                 m_stdout = mock.MagicMock()
                 type(m_sys).stdout = m_stdout
@@ -2108,6 +2112,7 @@ A fix is available in Ubuntu standard updates.\n"""
                     affected_pkg_status=affected_pkg_status,
                     installed_packages=installed_pkgs,
                     usn_released_pkgs=usn_released_pkgs,
+                    dry_run=False,
                 )
                 assert exp_ret == actual_ret
         out, err = capsys.readouterr()
@@ -2115,7 +2120,8 @@ A fix is available in Ubuntu standard updates.\n"""
 
         assert [
             mock.call(
-                "",
+                True,
+                Notice.ENABLE_REBOOT_REQUIRED,
                 ENABLE_REBOOT_REQUIRED_TMPL.format(operation="fix operation"),
             )
         ] == m_add_notice.call_args_list
@@ -2133,6 +2139,7 @@ A fix is available in Ubuntu standard updates.\n"""
                     (1/1) slsrc:
                     A fix is available in Ubuntu standard updates.
                     The update is already installed.
+
                     {check} USN-### is resolved.
                     """.format(
                         check=OKGREEN_CHECK  # noqa: E126
@@ -2141,8 +2148,8 @@ A fix is available in Ubuntu standard updates.\n"""
             ),
         ),
     )
-    @mock.patch("uaclient.config.UAConfig.add_notice")
-    @mock.patch("uaclient.util.should_reboot", return_value=True)
+    @mock.patch("uaclient.files.notices.NoticesManager.add")
+    @mock.patch("uaclient.system.should_reboot", return_value=True)
     @mock.patch("uaclient.apt.run_apt_command", return_value="")
     @mock.patch("os.getuid", return_value=0)
     @mock.patch("uaclient.security.get_cloud_type")
@@ -2173,6 +2180,7 @@ A fix is available in Ubuntu standard updates.\n"""
                 affected_pkg_status=affected_pkg_status,
                 installed_packages=installed_packages,
                 usn_released_pkgs=usn_released_pkgs,
+                dry_run=False,
             )
         out, err = capsys.readouterr()
         assert expected in out
@@ -2181,7 +2189,7 @@ A fix is available in Ubuntu standard updates.\n"""
 class TestUpgradePackagesAndAttach:
     @pytest.mark.parametrize("getuid_value", ((0), (1)))
     @mock.patch("os.getuid")
-    @mock.patch("uaclient.security.util.subp")
+    @mock.patch("uaclient.security.system.subp")
     def test_upgrade_packages_are_installed_without_need_for_ua(
         self, m_subp, m_os_getuid, getuid_value, capsys
     ):
@@ -2190,8 +2198,9 @@ class TestUpgradePackagesAndAttach:
 
         upgrade_packages_and_attach(
             cfg=None,
-            upgrade_packages=["t1", "t2"],
+            upgrade_pkgs=["t1", "t2"],
             pocket="Ubuntu standard updates",
+            dry_run=False,
         )
 
         out, err = capsys.readouterr()
@@ -2229,7 +2238,7 @@ class TestGetUSNAffectedPackagesStatus:
             ),
         ),
     )
-    @mock.patch("uaclient.util.get_platform_info")
+    @mock.patch("uaclient.system.get_platform_info")
     def test_pkgs_come_from_release_packages_if_usn_has_no_cves(
         self,
         m_platform_info,
@@ -2261,6 +2270,53 @@ class TestGetUSNAffectedPackagesStatus:
 
 
 class TestFixSecurityIssueId:
+    @pytest.mark.parametrize(
+        "issue_id,livepatch_status,exp_ret",
+        (
+            (
+                "cve-2013-1798",
+                {
+                    "Status": [
+                        {
+                            "Kernel": "4.4.0-210.242-generic",
+                            "Running": True,
+                            "Livepatch": {
+                                "CheckState": "checked",
+                                "State": "applied",
+                                "Version": "87.1",
+                                "Fixes": [
+                                    {
+                                        "Name": "cve-2013-1798",
+                                        "Description": "Mock Description",
+                                        "Bug": "",
+                                        "Patched": True,
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                },
+                FixStatus.SYSTEM_NON_VULNERABLE,
+            ),
+        ),
+    )
+    @mock.patch("uaclient.system.subp")
+    def test_patched_msg_when_issue_id_fixed_by_livepatch(
+        self,
+        subp,
+        issue_id,
+        livepatch_status,
+        exp_ret,
+        FakeConfig,
+    ):
+        """fix_security_id returns system not vulnerable when issue_id fixed
+        by livepatch"""
+        subp.return_value = json.dumps(livepatch_status), ""
+        with mock.patch(
+            "uaclient.security.query_installed_source_pkg_versions"
+        ):
+            assert exp_ret == fix_security_issue_id(FakeConfig(), issue_id)
+
     @pytest.mark.parametrize(
         "issue_id", (("CVE-1800-123456"), ("USN-12345-12"))
     )
@@ -2435,7 +2491,7 @@ class TestMergeUSNReleasedBinaryPackageVersions:
             )
             usns.append(usn)
 
-        with mock.patch("uaclient.util._subp", side_effect=_subp):
+        with mock.patch("uaclient.system._subp", side_effect=_subp):
             usn_pkgs_dict = merge_usn_released_binary_package_versions(
                 usns, beta_packages
             )
@@ -2494,3 +2550,92 @@ class TestOverrideUSNReleasePackageStatus:
             assert override.response == orig_cve.response
         else:
             assert expected == override.response
+
+
+class TestCheckAttached:
+    def test_check_attached_print_message_and_succeed_on_dry_run(
+        self,
+        FakeConfig,
+        capsys,
+    ):
+        cfg = FakeConfig()
+        assert _check_attached(cfg, dry_run=True)
+
+        out, _ = capsys.readouterr()
+        assert SECURITY_DRY_RUN_UA_NOT_ATTACHED in out
+
+
+class TestCheckSubscriptionForRequiredService:
+    @mock.patch("uaclient.security._get_service_for_pocket")
+    def test_check_subscription_print_message_and_succeed_on_dry_run(
+        self,
+        m_get_service,
+        FakeConfig,
+        capsys,
+    ):
+        ent_mock = mock.MagicMock()
+        ent_mock.user_facing_status.return_value = (
+            UserFacingStatus.INACTIVE,
+            None,
+        )
+        ent_mock.applicability_status.return_value = (
+            ApplicabilityStatus.APPLICABLE,
+            None,
+        )
+        type(ent_mock).name = mock.PropertyMock(return_value="test")
+
+        m_get_service.return_value = ent_mock
+        cfg = FakeConfig()
+        assert _check_subscription_for_required_service(
+            pocket="", cfg=cfg, dry_run=True
+        )
+
+        out, _ = capsys.readouterr()
+        assert (
+            SECURITY_DRY_RUN_UA_SERVICE_NOT_ENABLED.format(service="test")
+            in out
+        )
+
+    @mock.patch("uaclient.security._get_service_for_pocket")
+    def test_check_subscription_when_service_enabled(
+        self, m_get_service, FakeConfig
+    ):
+        ent_mock = mock.MagicMock()
+        ent_mock.user_facing_status.return_value = (
+            UserFacingStatus.ACTIVE,
+            None,
+        )
+
+        m_get_service.return_value = ent_mock
+        cfg = FakeConfig()
+        assert _check_subscription_for_required_service(
+            pocket="", cfg=cfg, dry_run=False
+        )
+
+
+class TestCheckSubscriptionIsExpired:
+    def test_check_subscription_is_expired_passes_on_dry_run(
+        self, FakeConfig, capsys
+    ):
+        now = datetime.datetime.utcnow()
+        expire_date = now + datetime.timedelta(days=-10)
+        status_cache = {"expires": expire_date}
+
+        assert not _check_subscription_is_expired(
+            status_cache=status_cache, cfg=None, dry_run=True
+        )
+
+        out, _ = capsys.readouterr()
+        assert SECURITY_DRY_RUN_UA_EXPIRED_SUBSCRIPTION in out
+
+    @mock.patch("uaclient.security._prompt_for_new_token")
+    def test_check_subscription_is_expired(self, m_prompt, FakeConfig, capsys):
+        m_prompt.return_value = False
+        now = datetime.datetime.utcnow()
+        expire_date = now + datetime.timedelta(days=-10)
+        status_cache = {"expires": expire_date}
+
+        assert _check_subscription_is_expired(
+            status_cache=status_cache, cfg=None, dry_run=False
+        )
+        assert 1 == m_prompt.call_count

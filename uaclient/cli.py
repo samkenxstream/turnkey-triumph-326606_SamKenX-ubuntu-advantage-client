@@ -1,6 +1,4 @@
-#!/usr/bin/env python
-
-"""Client to manage Ubuntu Advantage services on a machine."""
+"""Client to manage Ubuntu Pro services on a machine."""
 
 import argparse
 import json
@@ -8,7 +6,6 @@ import logging
 import os
 import pathlib
 import re
-import shutil
 import sys
 import tarfile
 import tempfile
@@ -21,9 +18,12 @@ import yaml
 
 from uaclient import (
     actions,
+    apt,
+    apt_news,
     config,
     contract,
     daemon,
+    defaults,
     entitlements,
     event_logger,
     exceptions,
@@ -34,16 +34,30 @@ from uaclient import (
 )
 from uaclient import status as ua_status
 from uaclient import util, version
+from uaclient.api.api import call_api
+from uaclient.api.u.pro.attach.auto.full_auto_attach.v1 import (
+    FullAutoAttachOptions,
+    _full_auto_attach,
+)
+from uaclient.api.u.pro.attach.magic.initiate.v1 import _initiate
+from uaclient.api.u.pro.attach.magic.revoke.v1 import (
+    MagicAttachRevokeOptions,
+    _revoke,
+)
+from uaclient.api.u.pro.attach.magic.wait.v1 import (
+    MagicAttachWaitOptions,
+    _wait,
+)
+from uaclient.api.u.pro.security.status.reboot_required.v1 import (
+    _reboot_required,
+)
 from uaclient.apt import AptProxyScope, setup_apt_proxy
-from uaclient.clouds import AutoAttachCloudInstance  # noqa: F401
-from uaclient.clouds import identity
 from uaclient.data_types import AttachActionsConfigFile, IncorrectTypeError
-from uaclient.defaults import (
-    CLOUD_BUILD_INFO,
-    CONFIG_FIELD_ENVVAR_ALLOWLIST,
-    DEFAULT_CONFIG_FILE,
-    DEFAULT_LOG_FORMAT,
-    PRINT_WRAP_WIDTH,
+from uaclient.defaults import DEFAULT_LOG_FORMAT, PRINT_WRAP_WIDTH
+from uaclient.entitlements import (
+    create_enable_entitlements_not_found_message,
+    entitlements_disable_order,
+    get_valid_entitlement_names,
 )
 from uaclient.entitlements.entitlement_status import (
     ApplicationStatus,
@@ -51,22 +65,20 @@ from uaclient.entitlements.entitlement_status import (
     CanEnableFailure,
     CanEnableFailureReason,
 )
-
-# TODO: Better address service commands running on cli
-# It is not ideal for us to import an entitlement directly on the cli module.
-# We need to refactor this to avoid that type of coupling in the code.
-from uaclient.entitlements.livepatch import LIVEPATCH_CMD
+from uaclient.files import notices, state_files
+from uaclient.files.notices import Notice
 from uaclient.jobs.update_messaging import (
     refresh_motd,
     update_apt_and_motd_messages,
 )
 
-NAME = "ua"
+NAME = "pro"
 
 USAGE_TMPL = "{name} {command} [flags]"
 EPILOG_TMPL = (
     "Use {name} {command} --help for more information about a command."
 )
+TRY_HELP = "Try 'pro --help' for more information."
 
 STATUS_HEADER_TMPL = """\
 Account: {account}
@@ -80,13 +92,14 @@ STATUS_FORMATS = ["tabular", "json", "yaml"]
 
 UA_COLLECT_LOGS_FILE = "ua_logs.tar.gz"
 
-UA_SERVICES = (
-    "ua-timer.service",
-    "ua-timer.timer",
-    "ua-auto-attach.path",
-    "ua-auto-attach.service",
-    "ua-reboot-cmds.service",
-    "ubuntu-advantage.service",
+NEW_VERSION_NOTICE = (
+    "\n"
+    + messages.BLUE_INFO
+    + """\
+ A new version is available: {version}
+Please run:
+    sudo apt-get install ubuntu-advantage-tools
+to get the latest version with new features and bug fixes."""
 )
 
 event = event_logger.get_event_logger()
@@ -99,7 +112,7 @@ class UAArgumentParser(argparse.ArgumentParser):
         usage=None,
         epilog=None,
         formatter_class=argparse.HelpFormatter,
-        base_desc: str = None,
+        base_desc: Optional[str] = None,
     ):
         super().__init__(
             prog=prog,
@@ -112,6 +125,18 @@ class UAArgumentParser(argparse.ArgumentParser):
 
     def error(self, message):
         self.print_usage(sys.stderr)
+        # In some cases (e.g. `pro --wrong-flag`) argparse errors out asking
+        # for required arguments, but the error message it gives us doesn't
+        # include any info about what required args it expects.
+        # In python versions prior to 3.9 there is no `exit_on_error` param
+        # to ArgumentParser, and as a result, there is no built-in way of
+        # catching the ArgumentError exception and handling it ourselves.
+        # Instead we just look for the buggy error message.
+        # Rather than try to fill in what arguments argparse was hoping for,
+        # we just suggest the user runs `--help` which should cover most
+        # use cases.
+        if message == "the following arguments are required: ":
+            message = TRY_HELP
         self.exit(2, message + "\n")
 
     def print_help(self, file=None, show_all=False):
@@ -132,7 +157,8 @@ class UAArgumentParser(argparse.ArgumentParser):
 
     @staticmethod
     def _get_service_descriptions() -> Tuple[List[str], List[str]]:
-        cfg = config.UAConfig()
+        root_mode = os.getuid() == 0
+        cfg = config.UAConfig(root_mode=root_mode)
 
         service_info_tmpl = " - {name}: {description}{url}"
         non_beta_services_desc = []
@@ -249,18 +275,36 @@ def assert_not_attached(f):
     @wraps(f)
     def new_f(args, cfg):
         if cfg.is_attached:
-            raise exceptions.AlreadyAttachedError(cfg)
+            raise exceptions.AlreadyAttachedError(
+                cfg.machine_token_file.account.get("name", "")
+            )
         return f(args, cfg=cfg)
 
     return new_f
+
+
+def api_parser(parser):
+    """Build or extend an arg parser for the api subcommand."""
+    parser.prog = "api"
+    parser.description = "Calls the Client API endpoints."
+    parser.add_argument(
+        "endpoint_path", metavar="endpoint", help="API endpoint to call"
+    )
+    parser.add_argument(
+        "--args",
+        dest="options",
+        default=[],
+        nargs="*",
+        help="Options to pass to the API endpoint, formatted as key=value",
+    )
+    return parser
 
 
 def auto_attach_parser(parser):
     """Build or extend an arg parser for auto-attach subcommand."""
     parser.prog = "auto-attach"
     parser.description = (
-        "Automatically attach an Ubuntu Advantage token on Ubuntu Pro"
-        " images."
+        "Automatically attach on an Ubuntu Pro cloud instance."
     )
     parser.usage = USAGE_TMPL.format(name=NAME, command=parser.prog)
     parser._optionals.title = "Flags"
@@ -271,7 +315,7 @@ def collect_logs_parser(parser):
     """Build or extend an arg parser for 'collect-logs' subcommand."""
     parser.prog = "collect-logs"
     parser.description = (
-        "Collect UA logs and relevant system information into a tarball."
+        "Collect logs and relevant system information into a tarball."
     )
     parser.usage = USAGE_TMPL.format(name=NAME, command=parser.prog)
     parser.add_argument(
@@ -302,14 +346,12 @@ def config_set_parser(parser):
     """Build or extend an arg parser for 'config set' subcommand."""
     parser.usage = USAGE_TMPL.format(name=NAME, command="set <key>=<value>")
     parser.prog = "set"
-    parser.description = (
-        "Set and apply Ubuntu Advantage configuration settings"
-    )
+    parser.description = "Set and apply Ubuntu Pro configuration settings"
     parser._optionals.title = "Flags"
     parser.add_argument(
         "key_value_pair",
         help=(
-            "key=value pair to configure for Ubuntu Advantage services."
+            "key=value pair to configure for Ubuntu Pro services."
             " Key must be one of: {}".format(
                 ", ".join(config.UA_CONFIGURABLE_KEYS)
             )
@@ -322,11 +364,11 @@ def config_unset_parser(parser):
     """Build or extend an arg parser for 'config unset' subcommand."""
     parser.usage = USAGE_TMPL.format(name=NAME, command="unset <key>")
     parser.prog = "unset"
-    parser.description = "Unset Ubuntu Advantage configuration setting"
+    parser.description = "Unset Ubuntu Pro configuration setting"
     parser.add_argument(
         "key",
         help=(
-            "configuration key to unset from Ubuntu Advantage services."
+            "configuration key to unset from Ubuntu Pro services."
             " One of: {}".format(", ".join(config.UA_CONFIGURABLE_KEYS))
         ),
         metavar="key",
@@ -339,25 +381,25 @@ def config_parser(parser):
     """Build or extend an arg parser for config subcommand."""
     parser.usage = USAGE_TMPL.format(name=NAME, command="config <command>")
     parser.prog = "config"
-    parser.description = "Manage Ubuntu Advantage configuration"
+    parser.description = "Manage Ubuntu Pro configuration"
     parser._optionals.title = "Flags"
     subparsers = parser.add_subparsers(
         title="Available Commands", dest="command", metavar=""
     )
     parser_show = subparsers.add_parser(
-        "show", help="show all Ubuntu Advantage configuration setting(s)"
+        "show", help="show all Ubuntu Pro configuration setting(s)"
     )
     parser_show.set_defaults(action=action_config_show)
     config_show_parser(parser_show)
 
     parser_set = subparsers.add_parser(
-        "set", help="set Ubuntu Advantage configuration setting"
+        "set", help="set Ubuntu Pro configuration setting"
     )
     parser_set.set_defaults(action=action_config_set)
     config_set_parser(parser_set)
 
     parser_unset = subparsers.add_parser(
-        "unset", help="unset Ubuntu Advantage configuration setting"
+        "unset", help="unset Ubuntu Pro configuration setting"
     )
     parser_unset.set_defaults(action=action_config_unset)
     config_unset_parser(parser_unset)
@@ -367,16 +409,26 @@ def config_parser(parser):
 def attach_parser(parser):
     """Build or extend an arg parser for attach subcommand."""
     parser.usage = USAGE_TMPL.format(name=NAME, command="attach <token>")
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
     parser.prog = "attach"
+    base_desc = (
+        "Attach this machine to Ubuntu Pro with a token obtained"
+        " from:\n{}".format(defaults.BASE_UA_URL)
+    )
     parser.description = (
-        "Attach this machine to Ubuntu Advantage with a token obtained"
-        " from https://ubuntu.com/advantage"
+        base_desc
+        + "\n\n"
+        + (
+            "When running this command without a token, it will generate "
+            "a short code\nand prompt you to attach the machine to your "
+            "Ubuntu Pro account using\na web browser."
+        )
     )
     parser._optionals.title = "Flags"
     parser.add_argument(
         "token",
         nargs="?",  # action_attach asserts this required argument
-        help="token obtained for Ubuntu Advantage authentication: {}".format(
+        help="token obtained for Ubuntu Pro authentication: {}".format(
             UA_AUTH_TOKEN_URL
         ),
     )
@@ -422,6 +474,16 @@ def fix_parser(parser):
             " Format: CVE-yyyy-nnnn, CVE-yyyy-nnnnnnn or USN-nnnn-dd"
         ),
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "If used, fix will not actually run but will display"
+            " everything that will happen on the machine during the"
+            " command."
+        ),
+    )
+
     return parser
 
 
@@ -432,26 +494,52 @@ def security_status_parser(parser):
     parser.description = textwrap.dedent(
         """\
         Show security updates for packages in the system, including all
-        available ESM related content.
+        available Expanded Security Maintenance (ESM) related content.
 
-        Besides the list of security updates, it also shows a summary of the
-        installed packages based on the origin.
+        Shows counts of how many packages are supported for security updates
+        in the system.
+
+        If called with --format json|yaml it shows a summary of the
+        installed packages based on the origin:
         - main/restricted/universe/multiverse: packages from the Ubuntu archive
-        - ESM Infra/Apps: packages from ESM
+        - esm-infra/esm-apps: packages from the ESM archive
         - third-party: packages installed from non-Ubuntu sources
         - unknown: packages which don't have an installation source (like local
           deb packages or packages for which the source was removed)
 
-        The summary contains basic information about UA and ESM. For a complete
-        status on UA services, run 'ua status'
+        The output contains basic information about Ubuntu Pro. For a
+        complete status on Ubuntu Pro services, run 'pro status'.
         """
     )
 
     parser.add_argument(
         "--format",
-        help=("Format for the output (json or yaml)"),
-        choices=("json", "yaml"),
-        required=True,
+        help=("Format for the output"),
+        choices=("json", "yaml", "text"),
+        default="text",
+    )
+
+    group = parser.add_mutually_exclusive_group()
+
+    group.add_argument(
+        "--thirdparty",
+        help=("List and present information about third-party packages"),
+        action="store_true",
+    )
+    group.add_argument(
+        "--unavailable",
+        help=("List and present information about unavailable packages"),
+        action="store_true",
+    )
+    group.add_argument(
+        "--esm-infra",
+        help=("List and present information about esm-infra packages"),
+        action="store_true",
+    )
+    group.add_argument(
+        "--esm-apps",
+        help=("List and present information about esm-apps packages"),
+        action="store_true",
     )
     return parser
 
@@ -460,39 +548,62 @@ def refresh_parser(parser):
     """Build or extend an arg parser for refresh subcommand."""
     parser.prog = "refresh"
     parser.description = (
-        "Refresh existing Ubuntu Advantage contract and update services."
+        "Refresh existing Ubuntu Pro contract and update services."
     )
     parser.usage = USAGE_TMPL.format(
-        name=NAME, command="refresh [contract|config]"
+        name=NAME, command="refresh [contract|config|messages]"
     )
+
     parser._optionals.title = "Flags"
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
+    parser.description = textwrap.dedent(
+        """\
+        Refresh three distinct Ubuntu Pro related artifacts in the system:
+
+        * contract: Update contract details from the server.
+        * config:   Reload the config file.
+        * messages: Update APT and MOTD messages related to UA.
+
+        You can individually target any of the three specific actions,
+        by passing it's target to nome to the command.  If no `target`
+        is specified, all targets are refreshed.
+        """
+    )
     parser.add_argument(
         "target",
         choices=["contract", "config", "messages"],
         nargs="?",
         default=None,
-        help=(
-            "Target to refresh. `ua refresh contract` will update contract"
-            " details from the server and perform any updates necessary."
-            " `ua refresh config` will reload"
-            " /etc/ubuntu-advantage/uaclient.conf and perform any changes"
-            " necessary. `ua refresh messages` will refresh"
-            " the APT and MOTD messages associated with UA."
-            " `ua refresh` is the equivalent of `ua refresh"
-            " config && ua refresh contract && ua refresh motd`."
-        ),
+        help="Target to refresh.",
     )
     return parser
 
 
 def action_security_status(args, *, cfg, **kwargs):
-    # For now, --format is mandatory so no need to check for it here.
-    if args.format == "json":
-        print(json.dumps(security_status.security_status(cfg)))
+    if args.format == "text":
+        if args.thirdparty:
+            security_status.list_third_party_packages()
+        elif args.unavailable:
+            security_status.list_unavailable_packages()
+        elif args.esm_infra:
+            security_status.list_esm_infra_packages(cfg)
+        elif args.esm_apps:
+            security_status.list_esm_apps_packages(cfg)
+        else:
+            security_status.security_status(cfg)
+    elif args.format == "json":
+        print(
+            json.dumps(
+                security_status.security_status_dict(cfg),
+                sort_keys=True,
+                cls=util.DatetimeAwareJSONEncoder,
+            )
+        )
     else:
         print(
             yaml.safe_dump(
-                security_status.security_status(cfg), default_flow_style=False
+                security_status.security_status_dict(cfg),
+                default_flow_style=False,
             )
         )
     return 0
@@ -502,11 +613,15 @@ def action_fix(args, *, cfg, **kwargs):
     if not re.match(security.CVE_OR_USN_REGEX, args.security_issue):
         msg = (
             'Error: issue "{}" is not recognized.\n'
-            'Usage: "ua fix CVE-yyyy-nnnn" or "ua fix USN-nnnn"'
+            'Usage: "pro fix CVE-yyyy-nnnn" or "pro fix USN-nnnn"'
         ).format(args.security_issue)
         raise exceptions.UserFacingError(msg)
 
-    fix_status = security.fix_security_issue_id(cfg, args.security_issue)
+    fix_status = security.fix_security_issue_id(
+        cfg=cfg,
+        issue_id=args.security_issue,
+        dry_run=args.dry_run,
+    )
     return fix_status.value
 
 
@@ -515,7 +630,7 @@ def detach_parser(parser):
     usage = USAGE_TMPL.format(name=NAME, command="detach")
     parser.usage = usage
     parser.prog = "detach"
-    parser.description = "Detach this machine from Ubuntu Advantage services."
+    parser.description = "Detach this machine from Ubuntu Pro services."
     parser._optionals.title = "Flags"
     parser.add_argument(
         "--assume-yes",
@@ -538,7 +653,7 @@ def help_parser(parser, cfg: config.UAConfig):
     parser.usage = usage
     parser.prog = "help"
     parser.description = (
-        "Provide detailed information about Ubuntu Advantage services."
+        "Provide detailed information about Ubuntu Pro services."
     )
     parser._positionals.title = "Arguments"
     parser.add_argument(
@@ -576,7 +691,7 @@ def enable_parser(parser, cfg: config.UAConfig):
     usage = USAGE_TMPL.format(
         name=NAME, command="enable <service> [<service>]"
     )
-    parser.description = "Enable an Ubuntu Advantage service."
+    parser.description = "Enable an Ubuntu Pro service."
     parser.usage = usage
     parser.prog = "enable"
     parser._positionals.title = "Arguments"
@@ -586,7 +701,7 @@ def enable_parser(parser, cfg: config.UAConfig):
         action="store",
         nargs="+",
         help=(
-            "the name(s) of the Ubuntu Advantage services to enable."
+            "the name(s) of the Ubuntu Pro services to enable."
             " One of: {}".format(
                 ", ".join(entitlements.valid_services(cfg=cfg))
             )
@@ -596,6 +711,14 @@ def enable_parser(parser, cfg: config.UAConfig):
         "--assume-yes",
         action="store_true",
         help="do not prompt for confirmation before performing the enable",
+    )
+    parser.add_argument(
+        "--access-only",
+        action="store_true",
+        help=(
+            "do not auto-install packages. Valid for cc-eal, cis and "
+            "realtime-kernel."
+        ),
     )
     parser.add_argument(
         "--beta", action="store_true", help="allow beta service to be enabled"
@@ -615,7 +738,7 @@ def disable_parser(parser, cfg: config.UAConfig):
     usage = USAGE_TMPL.format(
         name=NAME, command="disable <service> [<service>]"
     )
-    parser.description = "Disable an Ubuntu Advantage service."
+    parser.description = "Disable an Ubuntu Pro service."
     parser.usage = usage
     parser.prog = "disable"
     parser._positionals.title = "Arguments"
@@ -625,7 +748,7 @@ def disable_parser(parser, cfg: config.UAConfig):
         action="store",
         nargs="+",
         help=(
-            "the name(s) of the Ubuntu Advantage services to disable"
+            "the name(s) of the Ubuntu Pro services to disable."
             " One of: {}".format(
                 ", ".join(entitlements.valid_services(cfg=cfg))
             )
@@ -646,19 +769,65 @@ def disable_parser(parser, cfg: config.UAConfig):
     return parser
 
 
+def system_parser(parser):
+    """Build or extend an arg parser for system subcommand."""
+    parser.usage = USAGE_TMPL.format(name=NAME, command="system <command>")
+    parser.description = (
+        "Output system related information related to Pro services"
+    )
+    parser.prog = "system"
+    parser._optionals.title = "Flags"
+    subparsers = parser.add_subparsers(
+        title="Available Commands", dest="command", metavar=""
+    )
+    parser_reboot_required = subparsers.add_parser(
+        "reboot-required", help="does the system need to be rebooted"
+    )
+    parser_reboot_required.set_defaults(action=action_system_reboot_required)
+    reboot_required_parser(parser_reboot_required)
+
+    return parser
+
+
+def reboot_required_parser(parser):
+    # This formatter_class ensures that our formatting below isn't lost
+    parser.usage = USAGE_TMPL.format(
+        name=NAME, command="system reboot-required"
+    )
+    parser.pro = "reboot-required"
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
+    parser.description = textwrap.dedent(
+        """\
+        Report the current reboot-required status for the machine.
+
+        This command will output one of the three following states
+        for the machine regarding reboot:
+
+        * no: The machine doesn't require a reboot
+        * yes: The machine requires a reboot
+        * yes-kernel-livepatches-applied: There are only kernel related
+          packages that require a reboot, but Livepatch has already provided
+          patches for the current running kernel. The machine still needs a
+          reboot, but you can assess if the reboot can be performed in the
+          nearest maintenance window.
+        """
+    )
+    return parser
+
+
 def status_parser(parser):
     """Build or extend an arg parser for status subcommand."""
     usage = USAGE_TMPL.format(name=NAME, command="status")
     parser.usage = usage
     parser.description = (
-        "Output the status information for Ubuntu Advantage services."
+        "Output the status information for Ubuntu Pro services."
     )
     parser.prog = "status"
     # This formatter_class ensures that our formatting below isn't lost
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
     parser.description = textwrap.dedent(
         """\
-        Report current status of Ubuntu Advantage services on system.
+        Report current status of Ubuntu Pro services on system.
 
         This shows whether this machine is attached to an Ubuntu Advantage
         support contract. When attached, the report includes the specific
@@ -697,7 +866,7 @@ def status_parser(parser):
         "--wait",
         action="store_true",
         default=False,
-        help="Block waiting on ua to complete",
+        help="Block waiting on pro to complete",
     )
     parser.add_argument(
         "--format",
@@ -723,6 +892,19 @@ def status_parser(parser):
     )
     parser._optionals.title = "Flags"
     return parser
+
+
+def _print_help_for_subcommand(
+    cfg: config.UAConfig, cmd_name: str, subcmd_name: str
+):
+    parser = get_parser(cfg=cfg)
+    subparser = parser._get_positional_actions()[0].choices[cmd_name]
+    valid_choices = subparser._get_positional_actions()[0].choices.keys()
+    if subcmd_name not in valid_choices:
+        parser._get_positional_actions()[0].choices[cmd_name].print_help()
+        raise exceptions.UserFacingError(
+            "\n<command> must be one of: {}".format(", ".join(valid_choices))
+        )
 
 
 def _perform_disable(entitlement, cfg, *, assume_yes, update_status=True):
@@ -757,38 +939,15 @@ def _perform_disable(entitlement, cfg, *, assume_yes, update_status=True):
     return ret
 
 
-def get_valid_entitlement_names(names: List[str], cfg: config.UAConfig):
-    """Return a list of valid entitlement names.
-
-    :param names: List of entitlements to validate
-    :return: a tuple of List containing the valid and invalid entitlements
-    """
-    entitlements_found = []
-
-    for ent_name in names:
-        if ent_name in entitlements.valid_services(
-            cfg=cfg, allow_beta=True, all_names=True
-        ):
-            entitlements_found.append(ent_name)
-
-    entitlements_not_found = sorted(set(names) - set(entitlements_found))
-
-    return entitlements_found, entitlements_not_found
-
-
 def action_config(args, *, cfg, **kwargs):
     """Perform the config action.
 
     :return: 0 on success, 1 otherwise
     """
-    parser = get_parser(cfg=cfg)
-    subparser = parser._get_positional_actions()[0].choices["config"]
-    valid_choices = subparser._get_positional_actions()[0].choices.keys()
-    if args.command not in valid_choices:
-        parser._get_positional_actions()[0].choices["config"].print_help()
-        raise exceptions.UserFacingError(
-            "\n<command> must be one of: {}".format(", ".join(valid_choices))
-        )
+    _print_help_for_subcommand(
+        cfg, cmd_name="config", subcmd_name=args.command
+    )
+    return 0
 
 
 def action_config_show(args, *, cfg, **kwargs):
@@ -827,7 +986,7 @@ def action_config_show(args, *, cfg, **kwargs):
         cfg.ua_apt_http_proxy or cfg.ua_apt_https_proxy
     ):
         print(
-            "\nError: Setting global apt proxy and ua scoped apt proxy at the"
+            "\nError: Setting global apt proxy and pro scoped apt proxy at the"
             " same time is unsupported. No apt proxy is set."
         )
 
@@ -888,7 +1047,7 @@ def action_config_set(args, *, cfg, **kwargs):
         if unset_current:
             print(
                 messages.WARNING_APT_PROXY_OVERWRITE.format(
-                    current_proxy="ua scoped apt", previous_proxy="global apt"
+                    current_proxy="pro scoped apt", previous_proxy="global apt"
                 )
             )
         configure_apt_proxy(cfg, AptProxyScope.UACLIENT, set_key, set_value)
@@ -923,7 +1082,7 @@ def action_config_set(args, *, cfg, **kwargs):
         if unset_current:
             print(
                 messages.WARNING_APT_PROXY_OVERWRITE.format(
-                    current_proxy="global apt", previous_proxy="ua scoped apt"
+                    current_proxy="global apt", previous_proxy="pro scoped apt"
                 )
             )
         configure_apt_proxy(cfg, AptProxyScope.GLOBAL, set_key, set_value)
@@ -932,7 +1091,6 @@ def action_config_set(args, *, cfg, **kwargs):
 
     elif set_key in (
         "update_messaging_timer",
-        "update_status_timer",
         "metering_timer",
     ):
         try:
@@ -949,6 +1107,13 @@ def action_config_set(args, *, cfg, **kwargs):
                     "<value> for interval must be a positive integer."
                 ).format(set_key, set_value)
             )
+    elif set_key == "apt_news":
+        set_value = set_value.lower() == "true"
+        if set_value:
+            apt_news.update_apt_news(cfg)
+        else:
+            state_files.apt_news_contents_file.delete()
+
     setattr(cfg, set_key, set_value)
 
 
@@ -1024,7 +1189,7 @@ def _create_enable_disable_unattached_msg(command, service_names, cfg):
         msg = messages.INVALID_SERVICE_OP_FAILURE.format(
             operation=command,
             invalid_service=", ".join(entitlements_not_found),
-            service_msg="See https://ubuntu.com/advantage",
+            service_msg="See {}".format(defaults.BASE_UA_URL),
         )
     return msg
 
@@ -1032,7 +1197,7 @@ def _create_enable_disable_unattached_msg(command, service_names, cfg):
 @verify_json_format_args
 @assert_root
 @assert_attached(_create_enable_disable_unattached_msg)
-@assert_lock_file("ua disable")
+@assert_lock_file("pro disable")
 def action_disable(args, *, cfg, **kwargs):
     """Perform the disable action on a list of entitlements.
 
@@ -1074,37 +1239,10 @@ def action_disable(args, *, cfg, **kwargs):
     return 0 if ret else 1
 
 
-def _create_enable_entitlements_not_found_message(
-    entitlements_not_found, cfg: config.UAConfig, *, allow_beta: bool
-) -> messages.NamedMessage:
-    """
-    Constructs the MESSAGE_INVALID_SERVICE_OP_FAILURE message
-    based on the attempted services and valid services.
-    """
-    valid_services_names = entitlements.valid_services(
-        cfg=cfg, allow_beta=allow_beta
-    )
-    valid_names = ", ".join(valid_services_names)
-    service_msg = "\n".join(
-        textwrap.wrap(
-            "Try " + valid_names + ".",
-            width=80,
-            break_long_words=False,
-            break_on_hyphens=False,
-        )
-    )
-
-    return messages.INVALID_SERVICE_OP_FAILURE.format(
-        operation="enable",
-        invalid_service=", ".join(entitlements_not_found),
-        service_msg=service_msg,
-    )
-
-
 @verify_json_format_args
 @assert_root
 @assert_attached(_create_enable_disable_unattached_msg)
-@assert_lock_file("ua enable")
+@assert_lock_file("pro enable")
 def action_enable(args, *, cfg, **kwargs):
     """Perform the enable action on a named entitlement.
 
@@ -1126,7 +1264,11 @@ def action_enable(args, *, cfg, **kwargs):
     for ent_name in entitlements_found:
         try:
             ent_ret, reason = actions.enable_entitlement_by_name(
-                cfg, ent_name, assume_yes=args.assume_yes, allow_beta=args.beta
+                cfg,
+                ent_name,
+                assume_yes=args.assume_yes,
+                allow_beta=args.beta,
+                access_only=args.access_only,
             )
             ua_status.status(cfg=cfg)  # Update the status cache
 
@@ -1160,7 +1302,7 @@ def action_enable(args, *, cfg, **kwargs):
             ret = False
 
     if entitlements_not_found:
-        msg = _create_enable_entitlements_not_found_message(
+        msg = create_enable_entitlements_not_found_message(
             entitlements_not_found, cfg=cfg, allow_beta=args.beta
         )
         event.services_failed(entitlements_not_found)
@@ -1173,17 +1315,21 @@ def action_enable(args, *, cfg, **kwargs):
 @verify_json_format_args
 @assert_root
 @assert_attached()
-@assert_lock_file("ua detach")
+@assert_lock_file("pro detach")
 def action_detach(args, *, cfg) -> int:
     """Perform the detach action for this machine.
 
     @return: 0 on success, 1 otherwise
     """
-    return _detach(cfg, assume_yes=args.assume_yes)
+    ret = _detach(cfg, assume_yes=args.assume_yes)
+    if ret == 0:
+        daemon.start()
+    event.process_events()
+    return ret
 
 
 def _detach(cfg: config.UAConfig, assume_yes: bool) -> int:
-    """Detach the machine from the active Ubuntu Advantage subscription,
+    """Detach the machine from the active Ubuntu Pro subscription,
 
     :param cfg: a ``config.UAConfig`` instance
     :param assume_yes: Assume a yes answer to any prompts requested.
@@ -1193,7 +1339,12 @@ def _detach(cfg: config.UAConfig, assume_yes: bool) -> int:
     @return: 0 on success, 1 otherwise
     """
     to_disable = []
-    for ent_cls in entitlements.ENTITLEMENT_CLASSES:
+    for ent_name in entitlements_disable_order(cfg):
+        try:
+            ent_cls = entitlements.entitlement_factory(cfg=cfg, name=ent_name)
+        except exceptions.EntitlementNotFoundError:
+            continue
+
         ent = ent_cls(cfg=cfg, assume_yes=assume_yes)
         # For detach, we should not consider that a service
         # cannot be disabled because of dependent services,
@@ -1201,23 +1352,6 @@ def _detach(cfg: config.UAConfig, assume_yes: bool) -> int:
         ret, _ = ent.can_disable(ignore_dependent_services=True)
         if ret:
             to_disable.append(ent)
-
-    """
-    We will make sure that services without dependencies are disabled first
-    PS: This will only work because we have only three services with reverse
-    dependencies:
-    * ros: ros-updates
-    * esm-infra: ros, ros-updates
-    * esm-apps: ros, ros-updates
-
-    Therefore, this logic will guarantee that we will always disable ros and
-    ros-updates before diabling the esm services. If that dependency chain
-    change, this logic won't hold anymore and must be properly fixed.
-
-    More details can be seen here:
-    https://github.com/canonical/ubuntu-advantage-client/issues/1831
-    """
-    to_disable.sort(key=lambda ent: len(ent.dependent_services))
 
     if to_disable:
         suffix = "s" if len(to_disable) > 1 else ""
@@ -1232,10 +1366,9 @@ def _detach(cfg: config.UAConfig, assume_yes: bool) -> int:
         _perform_disable(ent, cfg, assume_yes=assume_yes, update_status=False)
 
     cfg.delete_cache()
-    daemon.start()
+    cfg.machine_token_file.delete()
     update_apt_and_motd_messages(cfg)
     event.info(messages.DETACH_SUCCESS)
-    event.process_events()
     return 0
 
 
@@ -1257,6 +1390,7 @@ def _post_cli_attach(cfg: config.UAConfig) -> None:
         event.info(messages.ATTACH_SUCCESS_NO_CONTRACT_NAME)
 
     daemon.stop()
+    daemon.cleanup(cfg)
 
     status, _ret = actions.status(cfg)
     output = ua_status.format_tabular(status)
@@ -1264,61 +1398,20 @@ def _post_cli_attach(cfg: config.UAConfig) -> None:
     event.process_events()
 
 
+def action_api(args, *, cfg):
+    result = call_api(args.endpoint_path, args.options, cfg)
+    print(result.to_json())
+    return 0 if result.result == "success" else 1
+
+
 @assert_root
-@assert_lock_file("ua auto-attach")
-def action_auto_attach(args, *, cfg):
-    disable_auto_attach = util.is_config_value_true(
-        config=cfg.cfg, path_to_value="features.disable_auto_attach"
-    )
-    if disable_auto_attach:
-        msg = "Skipping auto-attach. Config disable_auto_attach is set."
-        logging.debug(msg)
-        print(msg)
-        return 0
-
-    instance = None  # type: Optional[AutoAttachCloudInstance]
+def action_auto_attach(args, *, cfg: config.UAConfig) -> int:
     try:
-        instance = identity.cloud_instance_factory()
-    except exceptions.CloudFactoryError as e:
-        if cfg.is_attached:
-            # We are attached on non-Pro Image, just report already attached
-            raise exceptions.AlreadyAttachedError(cfg)
-        if isinstance(e, exceptions.CloudFactoryNoCloudError):
-            raise exceptions.UserFacingError(
-                messages.UNABLE_TO_DETERMINE_CLOUD_TYPE
-            )
-        if isinstance(e, exceptions.CloudFactoryNonViableCloudError):
-            raise exceptions.UserFacingError(messages.UNSUPPORTED_AUTO_ATTACH)
-        if isinstance(e, exceptions.CloudFactoryUnsupportedCloudError):
-            raise exceptions.NonAutoAttachImageError(
-                messages.UNSUPPORTED_AUTO_ATTACH_CLOUD_TYPE.format(
-                    cloud_type=e.cloud_type
-                )
-            )
-        # we shouldn't get here, but this is a reasonable default just in case
-        raise exceptions.UserFacingError(
-            messages.UNABLE_TO_DETERMINE_CLOUD_TYPE
+        _full_auto_attach(
+            FullAutoAttachOptions(),
+            cfg=cfg,
+            mode=event_logger.EventLoggerMode.CLI,
         )
-
-    if not instance:
-        # we shouldn't get here, but this is a reasonable default just in case
-        raise exceptions.UserFacingError(
-            messages.UNABLE_TO_DETERMINE_CLOUD_TYPE
-        )
-
-    current_iid = identity.get_instance_id()
-    if cfg.is_attached:
-        prev_iid = cfg.read_cache("instance-id")
-        if str(current_iid) == str(prev_iid):
-            raise exceptions.AlreadyAttachedOnPROError(str(current_iid))
-        print("Re-attaching Ubuntu Advantage subscription on new instance")
-        if _detach(cfg, assume_yes=True) != 0:
-            raise exceptions.UserFacingError(
-                messages.DETACH_AUTOMATION_FAILURE
-            )
-
-    try:
-        actions.auto_attach(cfg, instance)
     except exceptions.UrlError:
         event.info(messages.ATTACH_FAILURE.msg)
         return 1
@@ -1327,22 +1420,56 @@ def action_auto_attach(args, *, cfg):
         return 0
 
 
+def _magic_attach(args, *, cfg, **kwargs):
+    if args.format == "json":
+        raise exceptions.MagicAttachInvalidParam(
+            param="--format",
+            value=args.format,
+        )
+
+    event.info("Initiating attach operation...")
+    initiate_resp = _initiate(cfg=cfg)
+
+    event.info("\nPlease sign in to your Ubuntu Pro account at this link:")
+    event.info("https://ubuntu.com/pro/attach")
+    event.info(
+        "And provide the following code: {}{}{}".format(
+            messages.TxtColor.BOLD,
+            initiate_resp.user_code,
+            messages.TxtColor.ENDC,
+        )
+    )
+
+    wait_options = MagicAttachWaitOptions(magic_token=initiate_resp.token)
+
+    try:
+        wait_resp = _wait(options=wait_options, cfg=cfg)
+    except exceptions.MagicAttachTokenError as e:
+        event.info("Failed to perform magic-attach")
+
+        revoke_options = MagicAttachRevokeOptions(
+            magic_token=initiate_resp.token
+        )
+        _revoke(options=revoke_options, cfg=cfg)
+        raise e
+
+    event.info("\nAttaching the machine...")
+    return wait_resp.contract_token
+
+
 @assert_not_attached
 @assert_root
-@assert_lock_file("ua attach")
+@assert_lock_file("pro attach")
 def action_attach(args, *, cfg):
-    if not args.token and not args.attach_config:
-        raise exceptions.UserFacingError(
-            msg=messages.ATTACH_REQUIRES_TOKEN.msg,
-            msg_code=messages.ATTACH_REQUIRES_TOKEN.name,
-        )
     if args.token and args.attach_config:
         raise exceptions.UserFacingError(
             msg=messages.ATTACH_TOKEN_ARG_XOR_CONFIG.msg,
             msg_code=messages.ATTACH_TOKEN_ARG_XOR_CONFIG.name,
         )
-
-    if args.token:
+    elif not args.token and not args.attach_config:
+        token = _magic_attach(args, cfg=cfg)
+        enable_services_override = None
+    elif args.token:
         token = args.token
         enable_services_override = None
     else:
@@ -1378,7 +1505,7 @@ def action_attach(args, *, cfg):
                     ret = 1
                     if (
                         reason is not None
-                        and isinstance(reason, ua_status.CanEnableFailure)
+                        and isinstance(reason, CanEnableFailure)
                         and reason.message is not None
                     ):
                         event.info(reason.message.msg)
@@ -1391,7 +1518,7 @@ def action_attach(args, *, cfg):
                     event.service_processed(name)
 
             if not_found:
-                msg = _create_enable_entitlements_not_found_message(
+                msg = create_enable_entitlements_not_found_message(
                     not_found, cfg=cfg, allow_beta=True
                 )
                 event.info(msg.msg, file_type=sys.stderr)
@@ -1401,83 +1528,17 @@ def action_attach(args, *, cfg):
         return ret
 
 
-def _write_command_output_to_file(
-    cmd, filename: str, return_codes: List[int] = None
-) -> None:
-    """Helper which runs a command and writes output or error to filename."""
-    try:
-        out, _ = util.subp(cmd.split(), rcs=return_codes)
-    except exceptions.ProcessExecutionError as e:
-        util.write_file("{}-error".format(filename), str(e))
-    else:
-        util.write_file(filename, out)
-
-
-# We have to assert root here, because the logs are not non-root user readable
-@assert_root
 def action_collect_logs(args, *, cfg: config.UAConfig):
     output_file = args.output or UA_COLLECT_LOGS_FILE
-
     with tempfile.TemporaryDirectory() as output_dir:
-
-        _write_command_output_to_file(
-            "cloud-id", "{}/cloud-id.txt".format(output_dir)
-        )
-        _write_command_output_to_file(
-            "ua status --format json", "{}/ua-status.json".format(output_dir)
-        )
-        _write_command_output_to_file(
-            "{} status".format(LIVEPATCH_CMD),
-            "{}/livepatch-status.txt".format(output_dir),
-        )
-        _write_command_output_to_file(
-            "systemctl list-timers --all",
-            "{}/systemd-timers.txt".format(output_dir),
-        )
-        _write_command_output_to_file(
-            (
-                "journalctl --boot=0 -o short-precise "
-                "{} "
-                "-u cloud-init-local.service "
-                "-u cloud-init-config.service -u cloud-config.service"
-            ).format(
-                " ".join(
-                    ["-u {}".format(s) for s in UA_SERVICES if ".service" in s]
-                )
-            ),
-            "{}/journalctl.txt".format(output_dir),
-        )
-
-        for service in UA_SERVICES:
-            _write_command_output_to_file(
-                "systemctl status {}".format(service),
-                "{}/{}.txt".format(output_dir, service),
-                return_codes=[0, 3],
-            )
-
-        ua_logs = (
-            cfg.cfg_path or DEFAULT_CONFIG_FILE,
-            cfg.log_file,
-            cfg.timer_log_file,
-            cfg.daemon_log_file,
-            cfg.data_path("jobs-status"),
-            CLOUD_BUILD_INFO,
-            *(
-                entitlement.repo_list_file_tmpl.format(name=entitlement.name)
-                for entitlement in entitlements.ENTITLEMENT_CLASSES
-                if issubclass(entitlement, entitlements.repo.RepoEntitlement)
-            ),
-        )
-
-        for log in ua_logs:
-            if os.path.isfile(log):
-                log_content = util.load_file(log)
-                log_content = util.redact_sensitive_logs(log_content)
-                util.write_file(log, log_content)
-                shutil.copy(log, output_dir)
-
-        with tarfile.open(output_file, "w:gz") as results:
-            results.add(output_dir, arcname="logs/")
+        actions.collect_logs(cfg, output_dir)
+        try:
+            with tarfile.open(output_file, "w:gz") as results:
+                results.add(output_dir, arcname="logs/")
+        except PermissionError as e:
+            logging.error(e)
+            return 1
+    return 0
 
 
 def get_parser(cfg: config.UAConfig):
@@ -1497,7 +1558,7 @@ def get_parser(cfg: config.UAConfig):
     parser.add_argument(
         "--version",
         action="version",
-        version=get_version(),
+        version=version.get_version(),
         help="show version of {}".format(NAME),
     )
     parser._optionals.title = "Flags"
@@ -1507,10 +1568,18 @@ def get_parser(cfg: config.UAConfig):
     subparsers.required = True
     parser_attach = subparsers.add_parser(
         "attach",
-        help="attach this machine to an Ubuntu Advantage subscription",
+        help="attach this machine to an Ubuntu Pro subscription",
     )
     attach_parser(parser_attach)
     parser_attach.set_defaults(action=action_attach)
+
+    parser_api = subparsers.add_parser(
+        "api",
+        help="Calls the Client API endpoints.",
+    )
+    api_parser(parser_api)
+    parser_api.set_defaults(action=action_api)
+
     parser_auto_attach = subparsers.add_parser(
         "auto-attach", help="automatically attach on supported platforms"
     )
@@ -1518,34 +1587,34 @@ def get_parser(cfg: config.UAConfig):
     parser_auto_attach.set_defaults(action=action_auto_attach)
 
     parser_collect_logs = subparsers.add_parser(
-        "collect-logs", help="collect UA logs and debug information"
+        "collect-logs", help="collect Pro logs and debug information"
     )
     collect_logs_parser(parser_collect_logs)
     parser_collect_logs.set_defaults(action=action_collect_logs)
 
     parser_config = subparsers.add_parser(
-        "config", help="manage Ubuntu Advantage configuration on this machine"
+        "config", help="manage Ubuntu Pro configuration on this machine"
     )
     config_parser(parser_config)
     parser_config.set_defaults(action=action_config)
 
     parser_detach = subparsers.add_parser(
         "detach",
-        help="remove this machine from an Ubuntu Advantage subscription",
+        help="remove this machine from an Ubuntu Pro subscription",
     )
     detach_parser(parser_detach)
     parser_detach.set_defaults(action=action_detach)
 
     parser_disable = subparsers.add_parser(
         "disable",
-        help="disable a specific Ubuntu Advantage service on this machine",
+        help="disable a specific Ubuntu Pro service on this machine",
     )
     disable_parser(parser_disable, cfg=cfg)
     parser_disable.set_defaults(action=action_disable)
 
     parser_enable = subparsers.add_parser(
         "enable",
-        help="enable a specific Ubuntu Advantage service on this machine",
+        help="enable a specific Ubuntu Pro service on this machine",
     )
     enable_parser(parser_enable, cfg=cfg)
     parser_enable.set_defaults(action=action_enable)
@@ -1566,19 +1635,19 @@ def get_parser(cfg: config.UAConfig):
 
     parser_help = subparsers.add_parser(
         "help",
-        help="show detailed information about Ubuntu Advantage services",
+        help="show detailed information about Ubuntu Pro services",
     )
     help_parser(parser_help, cfg=cfg)
     parser_help.set_defaults(action=action_help)
 
     parser_refresh = subparsers.add_parser(
-        "refresh", help="refresh Ubuntu Advantage services"
+        "refresh", help="refresh Ubuntu Pro services"
     )
     parser_refresh.set_defaults(action=action_refresh)
     refresh_parser(parser_refresh)
 
     parser_status = subparsers.add_parser(
-        "status", help="current status of all Ubuntu Advantage services"
+        "status", help="current status of all Ubuntu Pro services"
     )
     parser_status.set_defaults(action=action_status)
     status_parser(parser_status)
@@ -1587,20 +1656,35 @@ def get_parser(cfg: config.UAConfig):
         "version", help="show version of {}".format(NAME)
     )
     parser_version.set_defaults(action=print_version)
+
+    parser_system = subparsers.add_parser(
+        "system", help="show system information related to Pro services"
+    )
+    parser_system.set_defaults(action=action_system)
+    system_parser(parser_system)
+
     return parser
 
 
-def action_status(args, *, cfg):
+def action_status(args, *, cfg: config.UAConfig):
     if not cfg:
         cfg = config.UAConfig()
-    show_beta = args.all if args else False
+    show_all = args.all if args else False
     token = args.simulate_with_token if args else None
     active_value = ua_status.UserFacingConfigStatus.ACTIVE.value
     if cfg.is_attached:
         try:
             if contract.is_contract_changed(cfg):
-                cfg.add_notice("", messages.NOTICE_REFRESH_CONTRACT_WARNING)
-        except exceptions.UrlError as e:
+                notices.add(
+                    cfg.root_mode,
+                    Notice.CONTRACT_REFRESH_WARNING,
+                )
+            else:
+                notices.remove(
+                    cfg.root_mode,
+                    Notice.CONTRACT_REFRESH_WARNING,
+                )
+        except Exception as e:
             with util.disable_log_to_console():
                 err_msg = messages.UPDATE_CHECK_CONTRACT_FAILURE.format(
                     reason=str(e)
@@ -1608,7 +1692,7 @@ def action_status(args, *, cfg):
                 logging.warning(err_msg)
                 event.warning(err_msg)
     status, ret = actions.status(
-        cfg, simulate_with_token=token, show_beta=show_beta
+        cfg, simulate_with_token=token, show_all=show_all
     )
     config_active = bool(status["execution_status"] == active_value)
 
@@ -1617,7 +1701,9 @@ def action_status(args, *, cfg):
             event.info(".", end="")
             time.sleep(1)
             status, ret = actions.status(
-                cfg, simulate_with_token=token, show_beta=show_beta
+                cfg,
+                simulate_with_token=token,
+                show_all=show_all,
             )
         event.info("")
 
@@ -1628,15 +1714,25 @@ def action_status(args, *, cfg):
     return ret
 
 
-def get_version(_args=None, _cfg=None):
-    if _cfg is None:
-        _cfg = config.UAConfig()
+def action_system(args, *, cfg, **kwargs):
+    """Perform the system action.
 
-    return version.get_version(features=_cfg.features)
+    :return: 0 on success, 1 otherwise
+    """
+    _print_help_for_subcommand(
+        cfg, cmd_name="system", subcmd_name=args.command
+    )
+    return 0
+
+
+def action_system_reboot_required(args, *, cfg: config.UAConfig):
+    result = _reboot_required(cfg)
+    event.info(result.reboot_required)
+    return 0
 
 
 def print_version(_args=None, cfg=None):
-    print(get_version(_args, cfg))
+    print(version.get_version())
 
 
 def _action_refresh_config(args, cfg: config.UAConfig):
@@ -1667,6 +1763,8 @@ def _action_refresh_messages(_args, cfg: config.UAConfig):
     try:
         update_apt_and_motd_messages(cfg)
         refresh_motd()
+        if cfg.apt_news:
+            apt_news.update_apt_news(cfg)
     except Exception as exc:
         with util.disable_log_to_console():
             logging.exception(exc)
@@ -1676,14 +1774,14 @@ def _action_refresh_messages(_args, cfg: config.UAConfig):
 
 
 @assert_root
-@assert_lock_file("ua refresh")
+@assert_lock_file("pro refresh")
 def action_refresh(args, *, cfg: config.UAConfig):
     if args.target is None or args.target == "config":
         _action_refresh_config(args, cfg)
 
     if args.target is None or args.target == "contract":
         _action_refresh_contract(args, cfg)
-        cfg.remove_notice("", messages.NOTICE_REFRESH_CONTRACT_WARNING)
+        notices.remove(cfg.root_mode, Notice.CONTRACT_REFRESH_WARNING)
 
     if args.target is None or args.target == "messages":
         _action_refresh_messages(args, cfg)
@@ -1692,7 +1790,10 @@ def action_refresh(args, *, cfg: config.UAConfig):
 
 
 def configure_apt_proxy(
-    cfg: config.UAConfig, scope: AptProxyScope, set_key: str, set_value: str
+    cfg: config.UAConfig,
+    scope: AptProxyScope,
+    set_key: str,
+    set_value: Optional[str],
 ) -> None:
     """
     Handles setting part the apt proxies - global and uaclient scoped proxies
@@ -1732,6 +1833,22 @@ def action_help(args, *, cfg):
             print("{}:\n{}\n".format(key.title(), value))
 
     return 0
+
+
+def _warn_about_new_version(cmd_args=None) -> None:
+    # If no args, then it was called from the main error handler.
+    # We don't want to show this text for the "api" CLI output,
+    # or for --format json|yaml
+    if (
+        cmd_args
+        and cmd_args.command == "api"
+        or getattr(cmd_args, "format", "") in ("json", "yaml")
+    ):
+        return
+
+    new_version = version.check_for_new_version()
+    if new_version:
+        logging.warning(NEW_VERSION_NOTICE.format(version=new_version))
 
 
 def setup_logging(console_level, log_level, log_file=None, logger=None):
@@ -1796,7 +1913,7 @@ def main_error_handler(func):
         except exceptions.UrlError as exc:
             if "CERTIFICATE_VERIFY_FAILED" in str(exc):
                 tmpl = messages.SSL_VERIFICATION_ERROR_CA_CERTIFICATES
-                if util.is_installed("ca-certificates"):
+                if apt.is_installed("ca-certificates"):
                     tmpl = messages.SSL_VERIFICATION_ERROR_OPENSSL_CONFIG
                 msg = tmpl.format(url=exc.url)
                 event.error(error_msg=msg.msg, error_code=msg.name)
@@ -1818,6 +1935,9 @@ def main_error_handler(func):
 
             lock.clear_lock_file_if_present()
             event.process_events()
+
+            _warn_about_new_version()
+
             sys.exit(1)
         except exceptions.UserFacingError as exc:
             with util.disable_log_to_console():
@@ -1833,6 +1953,9 @@ def main_error_handler(func):
                 # Only clear the lock if it is ours.
                 lock.clear_lock_file_if_present()
             event.process_events()
+
+            _warn_about_new_version()
+
             sys.exit(exc.exit_code)
         except Exception as e:
             with util.disable_log_to_console():
@@ -1845,6 +1968,9 @@ def main_error_handler(func):
                 error_msg=getattr(e, "msg", str(e)), error_type="exception"
             )
             event.process_events()
+
+            _warn_about_new_version()
+
             sys.exit(1)
 
     return wrapper
@@ -1854,12 +1980,13 @@ def main_error_handler(func):
 def main(sys_argv=None):
     if not sys_argv:
         sys_argv = sys.argv
-    cfg = config.UAConfig()
+    is_root = os.getuid() == 0
+    cfg = config.UAConfig(root_mode=is_root)
     parser = get_parser(cfg=cfg)
     cli_arguments = sys_argv[1:]
     if not cli_arguments:
         parser.print_usage()
-        print("Try 'ua --help' for more information.")
+        print(TRY_HELP)
         sys.exit(1)
     args = parser.parse_args(args=cli_arguments)
     set_event_mode(args)
@@ -1871,23 +1998,29 @@ def main(sys_argv=None):
     log_level = cfg.log_level
     console_level = logging.DEBUG if args.debug else logging.INFO
     setup_logging(console_level, log_level, cfg.log_file)
+
     logging.debug(
         util.redact_sensitive_logs("Executed with sys.argv: %r" % sys_argv)
     )
-    ua_environment = [
+
+    with util.disable_log_to_console():
+        cfg.warn_about_invalid_keys()
+
+    pro_environment = [
         "{}={}".format(k, v)
-        for k, v in sorted(os.environ.items())
-        if k.lower() in CONFIG_FIELD_ENVVAR_ALLOWLIST
-        or k.startswith("UA_FEATURES")
-        or k == "UA_CONFIG_FILE"
+        for k, v in sorted(util.get_pro_environment().items())
     ]
-    if ua_environment:
+    if pro_environment:
         logging.debug(
             util.redact_sensitive_logs(
-                "Executed with UA environment variables: %r" % ua_environment
+                "Executed with environment variables: %r" % pro_environment
             )
         )
-    return args.action(args, cfg=cfg)
+    return_value = args.action(args, cfg=cfg)
+
+    _warn_about_new_version(args)
+
+    return return_value
 
 
 if __name__ == "__main__":

@@ -16,88 +16,179 @@ from uaclient.config import (
     UA_CONFIGURABLE_KEYS,
     VALID_UA_CONFIG_KEYS,
     DataPath,
-    UAConfig,
-    depth_first_merge_overlay_dict,
     get_config_path,
     parse_config,
 )
-from uaclient.defaults import CONFIG_DEFAULTS, DEFAULT_CONFIG_FILE
+from uaclient.conftest import FakeNotice
+from uaclient.defaults import DEFAULT_CONFIG_FILE
 from uaclient.entitlements import valid_services
 from uaclient.entitlements.entitlement_status import ApplicationStatus
+from uaclient.files import notices
+from uaclient.files.notices import NoticesManager
+from uaclient.util import depth_first_merge_overlay_dict
 
 KNOWN_DATA_PATHS = (
     ("machine-access-cis", "machine-access-cis.json"),
-    ("machine-token", "machine-token.json"),
+    ("instance-id", "instance-id"),
 )
 M_PATH = "uaclient.entitlements."
 
-ALL_RESOURCES_AVAILABLE = [
-    {"name": name, "available": True}
-    for name in valid_services(cfg=UAConfig(), allow_beta=True)
-]
-ALL_RESOURCES_ENTITLED = [
-    {"type": name, "entitled": True}
-    for name in valid_services(cfg=UAConfig(), allow_beta=True)
-]
-NO_RESOURCES_ENTITLED = [
-    {"type": name, "entitled": False}
-    for name in valid_services(cfg=UAConfig(), allow_beta=True)
-]
-RESP_ONLY_FIPS_RESOURCE_AVAILABLE = [
-    {"name": name, "available": name == "fips"}
-    for name in valid_services(cfg=UAConfig(), allow_beta=True)
-]
+
+@pytest.fixture
+def all_resources_available(FakeConfig):
+    resources = [
+        {"name": name, "available": True}
+        for name in valid_services(cfg=FakeConfig(), allow_beta=True)
+    ]
+    return resources
+
+
+@pytest.fixture
+def all_resources_entitled(FakeConfig):
+    resources = [
+        {"type": name, "entitled": True}
+        for name in valid_services(cfg=FakeConfig(), allow_beta=True)
+    ]
+    return resources
+
+
+@pytest.fixture
+def no_resources_entitled(FakeConfig):
+    resources = [
+        {"type": name, "entitled": False}
+        for name in valid_services(cfg=FakeConfig(), allow_beta=True)
+    ]
+    return resources
+
+
+@pytest.fixture
+def resp_only_fips_resource_available(FakeConfig):
+    resources = [
+        {"name": name, "available": name == "fips"}
+        for name in valid_services(cfg=FakeConfig(), allow_beta=True)
+    ]
+    return resources
 
 
 class TestNotices:
     @pytest.mark.parametrize(
         "notices,expected",
         (
-            ([], []),
-            ([["a", "a1"]], [["a", "a1"]]),
-            ([["a", "a1"], ["a", "a1"]], [["a", "a1"]]),
+            ([], ()),
+            (
+                [[FakeNotice.a2, "a1"]],
+                [("", "a1")],
+            ),
+            (
+                [
+                    [FakeNotice.a, "a1"],
+                    [FakeNotice.a2, "a2"],
+                ],
+                [
+                    ("", "a1"),
+                    ("", "a2"),
+                ],
+            ),
+            (
+                [
+                    [FakeNotice.a, "a1"],
+                    [FakeNotice.a, "a1"],
+                ],
+                [
+                    ("", "a1"),
+                ],
+            ),
         ),
     )
-    def test_add_notice_avoids_duplicates(self, notices, expected, tmpdir):
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
-        assert None is cfg.read_cache("notices")
-        for notice in notices:
-            cfg.add_notice(*notice)
+    def test_add_notice_avoids_duplicates(
+        self,
+        notices,
+        expected,
+    ):
+        notice = NoticesManager()
+        assert [] == notice.list()
+        for notice_ in notices:
+            notice.add(True, *notice_)
         if notices:
-            assert expected == cfg.read_cache("notices")
+            assert expected == notice.list()
         else:
-            assert None is cfg.read_cache("notices")
+            assert [] == notice.list()
 
     @pytest.mark.parametrize(
-        "notices,removes,expected",
+        "_notices",
         (
-            ([], [["a", "a1"]], None),
-            ([["a", "a1"]], [["a", "a1"]], None),
-            ([["a", "a1"], ["a", "a2"]], [["a", "a1"]], [["a", "a2"]]),
+            ([]),
+            ([[FakeNotice.a]]),
             (
-                [["a", "a1"], ["a", "a2"], ["b", "b2"]],
-                [["a", ".*"]],
-                [["b", "b2"]],
+                [
+                    [FakeNotice.a],
+                    [FakeNotice.a2],
+                ]
+            ),
+        ),
+    )
+    def test_add_notice_fails_as_nonroot(
+        self,
+        _notices,
+    ):
+        assert [] == notices.list()
+        for notice_ in _notices:
+            notices.add(False, *notice_)
+        assert [] == notices.list()
+
+    @pytest.mark.parametrize(
+        "notices_,removes,expected",
+        (
+            ([], [FakeNotice.a], []),
+            (
+                [[FakeNotice.a2]],
+                [FakeNotice.a2],
+                [],
+            ),
+            (
+                [
+                    [FakeNotice.a],
+                    [FakeNotice.a2],
+                ],
+                [FakeNotice.a],
+                [("", "notice_a2")],
+            ),
+            (
+                [
+                    [FakeNotice.a],
+                    [FakeNotice.a2],
+                    [FakeNotice.b],
+                ],
+                [
+                    FakeNotice.a,
+                    FakeNotice.a2,
+                ],
+                [("", "notice_b")],
             ),
         ),
     )
     def test_remove_notice_removes_matching(
-        self, notices, removes, expected, tmpdir
+        self,
+        notices_,
+        removes,
+        expected,
     ):
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
-        for notice in notices:
-            cfg.add_notice(*notice)
-        for label, descr in removes:
-            cfg.remove_notice(label, descr)
-        assert expected == cfg.read_cache("notices")
+
+        for notice_ in notices_:
+            notices.add(True, *notice_)
+        for label in removes:
+            notices.remove(True, label)
+        assert expected == notices.list()
 
 
 class TestEntitlements:
-    def test_entitlements_property_keyed_by_entitlement_name(self, tmpdir):
+    def test_entitlements_property_keyed_by_entitlement_name(
+        self, tmpdir, FakeConfig, all_resources_available
+    ):
         """Return machine_token resourceEntitlements, keyed by name."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         token = {
-            "availableResources": ALL_RESOURCES_AVAILABLE,
+            "availableResources": all_resources_available,
             "machineTokenInfo": {
                 "contractInfo": {
                     "resourceEntitlements": [
@@ -107,7 +198,7 @@ class TestEntitlements:
                 }
             },
         }
-        cfg.write_cache("machine-token", token)
+        cfg.machine_token_file.write(token)
         expected = {
             "entitlement1": {
                 "entitlement": {"entitled": True, "type": "entitlement1"}
@@ -116,13 +207,16 @@ class TestEntitlements:
                 "entitlement": {"entitled": True, "type": "entitlement2"}
             },
         }
-        assert expected == cfg.entitlements
+        assert expected == cfg.machine_token_file.entitlements
 
-    def test_entitlements_uses_resource_token_from_machine_token(self, tmpdir):
-        """Include entitlement-specicific resourceTokens from machine_token"""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+    @mock.patch("os.getuid", return_value=0)
+    def test_entitlements_uses_resource_token_from_machine_token(
+        self, tmpdir, FakeConfig, all_resources_available
+    ):
+        """Include entitlement-specific resourceTokens from machine_token"""
+        cfg = FakeConfig()
         token = {
-            "availableResources": ALL_RESOURCES_AVAILABLE,
+            "availableResources": all_resources_available,
             "machineTokenInfo": {
                 "contractInfo": {
                     "resourceEntitlements": [
@@ -136,7 +230,7 @@ class TestEntitlements:
                 {"type": "entitlement2", "token": "ent2-token"},
             ],
         }
-        cfg.write_cache("machine-token", token)
+        cfg.machine_token_file.write(token)
         expected = {
             "entitlement1": {
                 "entitlement": {"entitled": True, "type": "entitlement1"},
@@ -147,48 +241,48 @@ class TestEntitlements:
                 "resourceToken": "ent2-token",
             },
         }
-        assert expected == cfg.entitlements
+        assert expected == cfg.machine_token_file.entitlements
 
 
 class TestAccounts:
-    def test_accounts_returns_empty_list_when_no_cached_account_value(
-        self, tmpdir
+    def test_accounts_returns_none_when_no_cached_account_value(
+        self, tmpdir, FakeConfig, all_resources_available
     ):
         """Config.accounts property returns an empty list when no cache."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
 
-        assert [] == cfg.accounts
+        assert cfg.machine_token_file.account is None
 
-    def test_accounts_extracts_accounts_key_from_machine_token_cache(
-        self, tmpdir
+    @pytest.mark.usefixtures("all_resources_available")
+    def test_accounts_extracts_account_key_from_machine_token_cache(
+        self, all_resources_available, tmpdir, FakeConfig
     ):
         """Use machine_token cached accountInfo when no accounts cache."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         accountInfo = {"id": "1", "name": "accountname"}
 
-        cfg.write_cache(
-            "machine-token",
+        cfg.machine_token_file.write(
             {
-                "availableResources": ALL_RESOURCES_AVAILABLE,
+                "availableResources": all_resources_available,
                 "machineTokenInfo": {"accountInfo": accountInfo},
             },
         )
 
-        assert [accountInfo] == cfg.accounts
+        assert accountInfo == cfg.machine_token_file.account
 
 
 class TestDataPath:
-    def test_data_path_returns_data_dir_path_without_key(self):
+    def test_data_path_returns_data_dir_path_without_key(self, FakeConfig):
         """The data_path method returns the data_dir when key is absent."""
-        cfg = UAConfig({"data_dir": "/my/dir"})
+        cfg = FakeConfig({"data_dir": "/my/dir"})
         assert "/my/dir/{}".format(PRIVATE_SUBDIR) == cfg.data_path()
 
     @pytest.mark.parametrize("key,path_basename", KNOWN_DATA_PATHS)
     def test_data_path_returns_file_path_with_defined_data_paths(
-        self, key, path_basename
+        self, key, path_basename, FakeConfig
     ):
         """When key is defined in Config.data_paths return data_path value."""
-        cfg = UAConfig({"data_dir": "/my/dir"})
+        cfg = FakeConfig({"data_dir": "/my/dir"})
         private_path = "/my/dir/{}/{}".format(PRIVATE_SUBDIR, path_basename)
         assert private_path == cfg.data_path(key=key)
 
@@ -196,24 +290,26 @@ class TestDataPath:
         "key,path_basename", (("notHere", "notHere"), ("anything", "anything"))
     )
     def test_data_path_returns_file_path_with_undefined_data_paths(
-        self, key, path_basename
+        self, key, path_basename, FakeConfig
     ):
         """When key is not in Config.data_paths the key is used to data_dir"""
-        cfg = UAConfig({"data_dir": "/my/d"})
+        cfg = FakeConfig({"data_dir": "/my/d"})
         assert "/my/d/{}/{}".format(PRIVATE_SUBDIR, key) == cfg.data_path(
             key=key
         )
 
-    def test_data_path_returns_public_path_for_public_datapath(self):
-        cfg = UAConfig({"data_dir": "/my/d"})
+    def test_data_path_returns_public_path_for_public_datapath(
+        self, FakeConfig
+    ):
+        cfg = FakeConfig({"data_dir": "/my/d"})
         cfg.data_paths["test_path"] = DataPath("test_path", False, False)
         assert "/my/d/test_path" == cfg.data_path("test_path")
 
 
 CFG_BASE_CONTENT = """\
-# Ubuntu-Advantage client config file.
-# If you modify this file, run "ua refresh config" to ensure changes are
-# picked up by Ubuntu-Advantage client.
+# Ubuntu Pro client config file.
+# If you modify this file, run "pro refresh config" to ensure changes are
+# picked up by Ubuntu Pro client.
 
 contract_url: https://contracts.canonical.com
 daemon_log_file: /var/log/ubuntu-advantage-daemon.log
@@ -225,9 +321,9 @@ timer_log_file: /var/log/ubuntu-advantage-timer.log
 """
 
 CFG_FEATURES_CONTENT = """\
-# Ubuntu-Advantage client config file.
-# If you modify this file, run "ua refresh config" to ensure changes are
-# picked up by Ubuntu-Advantage client.
+# Ubuntu Pro client config file.
+# If you modify this file, run "pro refresh config" to ensure changes are
+# picked up by Ubuntu Pro client.
 
 contract_url: https://contracts.canonical.com
 daemon_log_file: /var/log/ubuntu-advantage-daemon.log
@@ -250,6 +346,8 @@ UA_CFG_DICT = {
     "ua_config": {
         "apt_http_proxy": None,
         "apt_https_proxy": None,
+        "apt_news": True,
+        "apt_news_url": "https://motd.ubuntu.com/aptnews.json",
         "global_apt_http_proxy": None,
         "global_apt_https_proxy": None,
         "ua_apt_http_proxy": None,
@@ -257,7 +355,6 @@ UA_CFG_DICT = {
         "http_proxy": None,
         "https_proxy": None,
         "update_messaging_timer": None,
-        "update_status_timer": None,
         "metering_timer": None,
     }
 }
@@ -267,11 +364,13 @@ class TestUAConfigKeys:
     @pytest.mark.parametrize("attr_name", UA_CONFIGURABLE_KEYS)
     @mock.patch("uaclient.config.UAConfig.write_cfg")
     def test_ua_configurable_keys_set_ua_config_dict(
-        self, write_cfg, attr_name, tmpdir
+        self, write_cfg, attr_name, tmpdir, FakeConfig
     ):
         """Getters and settings are available fo UA_CONFIGURABLE_KEYS."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
-        assert None is getattr(cfg, attr_name, None)
+        cfg = FakeConfig()
+        assert UA_CFG_DICT["ua_config"][attr_name] == getattr(
+            cfg, attr_name, None
+        )
         cfg_non_members = ("apt_http_proxy", "apt_https_proxy")
         if attr_name not in cfg_non_members:
             setattr(cfg, attr_name, attr_name + "value")
@@ -280,21 +379,18 @@ class TestUAConfigKeys:
 
 
 class TestWriteCfg:
-    @pytest.mark.parametrize("caplog_text", [logging.WARNING], indirect=True)
     @pytest.mark.parametrize(
-        "orig_content, expected, warnings",
+        "orig_content, expected",
         (
             (
                 CFG_BASE_CONTENT,
                 CFG_BASE_CONTENT
                 + yaml.dump(UA_CFG_DICT, default_flow_style=False),
-                [],
             ),
             (  # Yaml output is sorted alphabetically by key
                 "\n".join(sorted(CFG_BASE_CONTENT.splitlines(), reverse=True)),
                 CFG_BASE_CONTENT
                 + yaml.dump(UA_CFG_DICT, default_flow_style=False),
-                [],
             ),
             # Any custom comments or unrecognized config keys are dropped
             (
@@ -302,10 +398,6 @@ class TestWriteCfg:
                 + CFG_BASE_CONTENT,
                 CFG_BASE_CONTENT
                 + yaml.dump(UA_CFG_DICT, default_flow_style=False),
-                [
-                    "Ignoring invalid uaclient.conf key:"
-                    " unknown-keys-not-preserved=True"
-                ],
             ),
             # All features/settings_overrides ordered after ua_config
             (
@@ -314,7 +406,6 @@ class TestWriteCfg:
                 " show_beta: true\nsettings_overrides:\n d: 2\n c: 1\n",
                 CFG_FEATURES_CONTENT
                 + yaml.dump(UA_CFG_DICT, default_flow_style=False),
-                [],
             ),
             (
                 "settings_overrides:\n c: 1\n d: 2\nfeatures:\n"
@@ -323,59 +414,31 @@ class TestWriteCfg:
                 + CFG_BASE_CONTENT,
                 CFG_FEATURES_CONTENT
                 + yaml.dump(UA_CFG_DICT, default_flow_style=False),
-                [],
             ),
         ),
     )
     def test_write_cfg_reads_cfg_andpersists_structured_content_to_config_path(
-        self, orig_content, warnings, expected, caplog_text, tmpdir
+        self, orig_content, expected, tmpdir, FakeConfig
     ):
         """write_cfg writes structured, ordered config YAML to config_path."""
         orig_conf = tmpdir.join("orig_uaclient.conf")
         orig_conf.write(orig_content)
-        cfg = UAConfig(cfg=parse_config(orig_conf.strpath))
+        cfg = FakeConfig(cfg_overrides=parse_config(orig_conf.strpath)[0])
         out_conf = tmpdir.join("uaclient.conf")
         cfg.write_cfg(out_conf.strpath)
         assert expected == out_conf.read()
-        warn_logs = caplog_text()
-        for warning in warnings:
-            assert warning in warn_logs
 
 
 class TestWriteCache:
-    @pytest.mark.parametrize(
-        "key,clears_cache",
-        (
-            ("machine-token", True),
-            ("machine-access-cis", True),
-            ("lock", False),
-        ),
-    )
-    def test_write_cache_clears_machine_token_and_entitlements_instance_vars(
-        self, key, clears_cache, tmpdir
-    ):
-        """Clear _machine_token and _entitlements when machine keys updated."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
-        # setup cached values
-        cfg._machine_token = mock.sentinel.token
-        cfg._entitlements = mock.sentinel.entitlements
-        cfg.write_cache(key, "something")
-        if clears_cache:
-            assert None is cfg._entitlements
-            assert None is cfg._machine_token
-        else:
-            assert mock.sentinel.token is cfg._machine_token
-            assert mock.sentinel.entitlements is cfg._entitlements
-
     @pytest.mark.parametrize(
         "key,content",
         (("unknownkey", "content1"), ("another-one", "content2")),
     )
     def test_write_cache_write_key_name_in_data_dir_when_data_path_absent(
-        self, tmpdir, key, content
+        self, tmpdir, FakeConfig, key, content
     ):
         """When key is not in data_paths, write content to data_dir/key."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         expected_path = tmpdir.join(PRIVATE_SUBDIR, key)
 
         assert not expected_path.check(), "Found unexpected file {}".format(
@@ -387,9 +450,9 @@ class TestWriteCache:
         )
         assert content == cfg.read_cache(key)
 
-    def test_write_cache_creates_secure_private_dir(self, tmpdir):
+    def test_write_cache_creates_secure_private_dir(self, tmpdir, FakeConfig):
         """private_dir is created with permission 0o700."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         # unknown keys are written to the private dir
         expected_dir = tmpdir.join(PRIVATE_SUBDIR)
         assert None is cfg.write_cache("somekey", "somevalue")
@@ -399,11 +462,11 @@ class TestWriteCache:
         assert 0o700 == stat.S_IMODE(os.lstat(expected_dir.strpath).st_mode)
 
     def test_write_cache_creates_dir_when_data_dir_does_not_exist(
-        self, tmpdir
+        self, tmpdir, FakeConfig
     ):
         """When data_dir doesn't exist, create it."""
         tmp_subdir = tmpdir.join("does/not/exist")
-        cfg = UAConfig({"data_dir": tmp_subdir.strpath})
+        cfg = FakeConfig({"data_dir": tmp_subdir.strpath})
 
         assert False is os.path.isdir(
             tmp_subdir.strpath
@@ -418,10 +481,10 @@ class TestWriteCache:
         "key,value", (("dictkey", {"1": "v1"}), ("listkey", [1, 2, 3]))
     )
     def test_write_cache_writes_json_string_when_content_not_a_string(
-        self, tmpdir, key, value
+        self, tmpdir, FakeConfig, key, value
     ):
         """When content is not a string, write a json string."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
 
         expected_json_content = json.dumps(value)
         assert None is cfg.write_cache(key, value)
@@ -436,14 +499,14 @@ class TestWriteCache:
             (DataPath("path", True, False), 0o600),
         ),
     )
-    def test_permissions(self, tmpdir, datapath, mode):
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+    def test_permissions(self, FakeConfig, datapath, mode):
+        cfg = FakeConfig()
         cfg.data_paths = {"path": datapath}
         cfg.write_cache("path", "")
         assert mode == stat.S_IMODE(os.lstat(cfg.data_path("path")).st_mode)
 
-    def test_write_datetime(self, tmpdir):
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+    def test_write_datetime(self, FakeConfig):
+        cfg = FakeConfig()
         key = "test_key"
         dt = datetime.datetime.now()
         cfg.write_cache(key, dt)
@@ -454,18 +517,18 @@ class TestWriteCache:
 class TestReadCache:
     @pytest.mark.parametrize("key,path_basename", KNOWN_DATA_PATHS)
     def test_read_cache_returns_none_when_data_path_absent(
-        self, tmpdir, key, path_basename
+        self, tmpdir, FakeConfig, key, path_basename
     ):
         """Return None when the specified key data_path is not cached."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         assert None is cfg.read_cache(key)
         assert not tmpdir.join(path_basename).check()
 
     @pytest.mark.parametrize("key,path_basename", KNOWN_DATA_PATHS)
     def test_read_cache_returns_content_when_data_path_present(
-        self, tmpdir, key, path_basename
+        self, tmpdir, FakeConfig, key, path_basename
     ):
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         os.makedirs(tmpdir.join(PRIVATE_SUBDIR).strpath)
         data_path = tmpdir.join(PRIVATE_SUBDIR, path_basename)
         with open(data_path.strpath, "w") as f:
@@ -475,9 +538,9 @@ class TestReadCache:
 
     @pytest.mark.parametrize("key,path_basename", KNOWN_DATA_PATHS)
     def test_read_cache_returns_stuctured_content_when_json_data_path_present(
-        self, tmpdir, key, path_basename
+        self, tmpdir, FakeConfig, key, path_basename
     ):
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         os.makedirs(tmpdir.join(PRIVATE_SUBDIR).strpath)
         data_path = tmpdir.join(PRIVATE_SUBDIR, path_basename)
         expected = {key: "content{}".format(key)}
@@ -486,8 +549,8 @@ class TestReadCache:
 
         assert expected == cfg.read_cache(key)
 
-    def test_datetimes_are_unserialised(self, tmpdir):
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+    def test_datetimes_are_unserialised(self, tmpdir, FakeConfig):
+        cfg = FakeConfig()
         os.makedirs(tmpdir.join(PRIVATE_SUBDIR).strpath)
         data_path = tmpdir.join(PRIVATE_SUBDIR, "dt_test")
         with open(data_path.strpath, "w") as f:
@@ -504,9 +567,9 @@ class TestReadCache:
 class TestDeleteCacheKey:
     @pytest.mark.parametrize("property_name", ("status-cache", "lock"))
     def test_delete_cache_key_removes_public_or_private_data_path_files(
-        self, property_name, tmpdir
+        self, property_name, FakeConfig
     ):
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         cfg.write_cache(property_name, "himom")
         assert True is os.path.exists(cfg.data_path(property_name))
         cfg.delete_cache_key(property_name)
@@ -522,11 +585,11 @@ class TestDeleteCacheKey:
         ),
     )
     def test_delete_cache_key_clears_machine_token_and_entitlements(
-        self, property_name, clears_cache, tmpdir
+        self, property_name, clears_cache, FakeConfig, all_resources_available
     ):
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         token = {
-            "availableResources": ALL_RESOURCES_AVAILABLE,
+            "availableResources": all_resources_available,
             "machineTokenInfo": {
                 "contractInfo": {
                     "resourceEntitlements": [
@@ -536,63 +599,40 @@ class TestDeleteCacheKey:
                 }
             },
         }
-        cfg.write_cache("machine-token", token)
-        cfg.entitlements  # sets config _entitlements and _machine_token cache
-        assert cfg._entitlements is not None
-        assert cfg._machine_token is not None
-        cfg.delete_cache_key(property_name)
+        cfg.machine_token_file.write(token)
+        # sets config _entitlements and _machine_token cache
+        cfg.machine_token_file.entitlements
+        assert cfg.machine_token_file._entitlements is not None
+        assert cfg.machine_token_file._machine_token is not None
+        if property_name == "machine-token":
+            cfg.machine_token_file.delete()
+        else:
+            cfg.delete_cache_key(property_name)
         if clears_cache:
             # internal cache is cleared
-            assert cfg._entitlements is None
-            assert cfg._machine_token is None
+            assert cfg.machine_token_file._entitlements is None
+            assert cfg.machine_token_file._machine_token is None
 
         # Reconstitutes _entitlements and _machine_token caches
-        entitlements = cfg.entitlements
+        entitlements = cfg.machine_token_file.entitlements
         if property_name == "machine-token":
             # We performed delete_cache_key("machine-token") above, so None now
-            assert None is cfg._entitlements
+            assert None is cfg.machine_token_file._entitlements
             assert None is cfg.machine_token
         else:
             # re-constitute from cache
-            assert entitlements is cfg._entitlements
-            assert cfg._machine_token is cfg.machine_token
+            assert entitlements is cfg.machine_token_file._entitlements
+            assert cfg.machine_token_file._machine_token is cfg.machine_token
 
 
 class TestDeleteCache:
-    @pytest.mark.parametrize(
-        "property_name,data_path_name,expected_null_value",
-        (("machine_token", "machine-token", None),),
-    )
-    def test_delete_cache_properly_clears_all_caches_simple(
-        self, tmpdir, property_name, data_path_name, expected_null_value
+    def test_delete_cache_unsets_entitlements(
+        self, FakeConfig, all_resources_available
     ):
-        """
-        Ensure that delete_cache clears the cache for simple attributes
-
-        (Simple in this context means those that are simply read from the
-        filesystem and returned.)
-        """
-        property_value = "our-value"
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
-
-        data_path = cfg.data_path(data_path_name)
-        os.makedirs(os.path.dirname(data_path))
-        with open(data_path, "w") as f:
-            f.write(property_value)
-
-        before_prop_value = getattr(cfg, property_name)
-        assert before_prop_value == property_value
-
-        cfg.delete_cache()
-
-        after_prop_value = getattr(cfg, property_name)
-        assert expected_null_value == after_prop_value
-
-    def test_delete_cache_unsets_entitlements(self, tmpdir):
         """The delete_cache unsets any cached entitlements content."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         token = {
-            "availableResources": ALL_RESOURCES_AVAILABLE,
+            "availableResources": all_resources_available,
             "machineTokenInfo": {
                 "contractInfo": {
                     "resourceEntitlements": [
@@ -601,21 +641,22 @@ class TestDeleteCache:
                 }
             },
         }
-        cfg.write_cache("machine-token", token)
+        cfg.machine_token_file.write(token)
         previous_entitlements = {
             "entitlement1": {
                 "entitlement": {"type": "entitlement1", "entitled": True}
             }
         }
-        assert previous_entitlements == cfg.entitlements
+        assert previous_entitlements == cfg.machine_token_file.entitlements
         cfg.delete_cache()
-        assert {} == cfg.entitlements
+        cfg.machine_token_file.delete()
+        assert {} == cfg.machine_token_file.entitlements
 
     def test_delete_cache_removes_all_data_path_files_with_delete_permanent(
-        self, tmpdir
+        self, tmpdir, FakeConfig
     ):
         """Any cached files defined in cfg.data_paths will be removed."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         # Create half of the cached files, but not all
         odd_keys = list(sorted(cfg.data_paths.keys()))[::2]
         for odd_key in odd_keys:
@@ -642,9 +683,11 @@ class TestDeleteCache:
             ", ".join(dirty_files)
         )
 
-    def test_delete_cache_ignores_permanent_data_path_files(self, tmpdir):
+    def test_delete_cache_ignores_permanent_data_path_files(
+        self, tmpdir, FakeConfig
+    ):
         """Any cached files defined in cfg.data_paths will be removed."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         for key in cfg.data_paths.keys():
             if key == "notices":
                 # notices key expects specific list or lists format
@@ -663,6 +706,7 @@ class TestDeleteCache:
         )
         assert len(cfg.data_paths.keys()) == len(present_files)
         cfg.delete_cache()
+        cfg.machine_token_file.delete()
         dirty_files = list(
             itertools.chain(
                 *[walk_entry[2] for walk_entry in os.walk(tmpdir.strpath)]
@@ -673,10 +717,10 @@ class TestDeleteCache:
         ), "{} files not deleted".format(", ".join(dirty_files))
 
     def test_delete_cache_ignores_files_not_defined_in_data_paths(
-        self, tmpdir
+        self, tmpdir, FakeConfig
     ):
         """Any files in data_dir undefined in cfg.data_paths will remain."""
-        cfg = UAConfig({"data_dir": tmpdir.strpath})
+        cfg = FakeConfig()
         t_file = tmpdir.join(PRIVATE_SUBDIR, "otherfile")
         os.makedirs(os.path.dirname(t_file.strpath))
         with open(t_file.strpath, "w") as f:
@@ -685,6 +729,7 @@ class TestDeleteCache:
             tmpdir.join(PRIVATE_SUBDIR).strpath
         )
         cfg.delete_cache()
+        cfg.machine_token_file.delete()
         assert [os.path.basename(t_file.strpath)] == os.listdir(
             tmpdir.join(PRIVATE_SUBDIR).strpath
         )
@@ -908,6 +953,7 @@ class TestProcessConfig:
         apt_http,
         capsys,
         tmpdir,
+        FakeConfig,
     ):
         m_snap_is_installed.return_value = snap_is_installed
         m_snap_get_config_option.side_effect = [snap_http_val, snap_https_val]
@@ -920,7 +966,7 @@ class TestProcessConfig:
             livepatch_http_val,
             livepatch_https_val,
         ]
-        cfg = UAConfig(
+        cfg = FakeConfig(
             {
                 "ua_config": {
                     "apt_http_proxy": apt_http,
@@ -932,7 +978,6 @@ class TestProcessConfig:
                     "http_proxy": http_proxy,
                     "https_proxy": https_proxy,
                     "update_messaging_timer": 21600,
-                    "update_status_timer": 43200,
                     "metering_timer": 0,
                 },
                 "data_dir": tmpdir.strpath,
@@ -1025,12 +1070,11 @@ class TestProcessConfig:
                 )
             assert "" == err
 
-    def test_process_config_errors_for_wrong_timers(self):
-        cfg = UAConfig(
+    def test_process_config_errors_for_wrong_timers(self, FakeConfig):
+        cfg = FakeConfig(
             {
                 "ua_config": {
                     "update_messaging_timer": "wrong",
-                    "update_status_timer": 43200,
                 }
             }
         )
@@ -1051,7 +1095,7 @@ class TestParseConfig:
     ):
         cwd = os.getcwd()
         with mock.patch.dict("uaclient.config.os.environ", values={}):
-            config = parse_config()
+            config, _ = parse_config()
         expected_calls = [
             mock.call("{}/uaclient.conf".format(cwd)),
             mock.call("/etc/ubuntu-advantage/uaclient.conf"),
@@ -1068,38 +1112,28 @@ class TestParseConfig:
         }
         assert expected_default_config == config
 
-    @pytest.mark.parametrize("caplog_text", [logging.WARNING], indirect=True)
     @pytest.mark.parametrize(
-        "config_dict,warnings",
+        "config_dict,expected_invalid_keys",
         (
             ({"contract_url": "http://abc", "security_url": "http:xyz"}, []),
             (
                 {"contract_urs": "http://abc", "security_url": "http:xyz"},
-                [
-                    "Ignoring invalid uaclient.conf key:"
-                    " contract_urs=http://abc\n"
-                ],
+                ["contract_urs"],
             ),
         ),
     )
-    def test_parse_config_warns_and_ignores_invalid_config(
-        self, config_dict, warnings, caplog_text, tmpdir
+    def test_parse_config_returns_invalid_keys(
+        self, config_dict, expected_invalid_keys, tmpdir
     ):
         config_file = tmpdir.join("uaclient.conf")
         config_file.write(yaml.dump(config_dict))
         env_vars = {"UA_CONFIG_FILE": config_file.strpath}
         with mock.patch.dict("uaclient.config.os.environ", values=env_vars):
-            cfg = parse_config(config_file.strpath)
-        expected = copy.deepcopy(CONFIG_DEFAULTS)
+            cfg, invalid_keys = parse_config(config_file.strpath)
+        assert set(expected_invalid_keys) == invalid_keys
         for key, value in config_dict.items():
             if key in VALID_UA_CONFIG_KEYS:
-                expected[key] = config_dict[key]
-        warn_logs = caplog_text()
-        for warning in warnings:
-            assert warning in warn_logs
-        if not warnings:
-            assert "Ignoring invalid uaclient.conf key" not in warn_logs
-        assert expected == cfg
+                assert config_dict[key] == cfg[key]
 
     @pytest.mark.parametrize(
         "envvar_name,envvar_val,field,expected_val",
@@ -1141,7 +1175,7 @@ class TestParseConfig:
     ):
         user_values = {envvar_name: envvar_val}
         with mock.patch.dict("uaclient.config.os.environ", values=user_values):
-            config = parse_config()
+            config, _ = parse_config()
         assert expected_val == config[field]
 
     @mock.patch("uaclient.config.os.path.exists", return_value=False)
@@ -1151,7 +1185,7 @@ class TestParseConfig:
             "UA_FEATURES_A_B_C": "ABC_VAL",
         }
         with mock.patch.dict("uaclient.config.os.environ", values=user_values):
-            config = parse_config()
+            config, _ = parse_config()
         expected_config = {
             "features": {"a_b_c": "ABC_VAL", "x_y_z": "XYZ_VAL"}
         }
@@ -1174,7 +1208,7 @@ class TestParseConfig:
         assert expected_msg == excinfo.value.msg
 
     @mock.patch("uaclient.config.os.path.exists")
-    @mock.patch("uaclient.util.load_file")
+    @mock.patch("uaclient.system.load_file")
     def test_parse_reads_yaml_from_environ_values(
         self, m_load_file, m_path_exists
     ):
@@ -1183,7 +1217,7 @@ class TestParseConfig:
 
         user_values = {"UA_FEATURES_TEST": "test.yaml"}
         with mock.patch.dict("uaclient.config.os.environ", values=user_values):
-            cfg = parse_config()
+            cfg, _ = parse_config()
 
         assert {"test": True, "foo": "bar"} == cfg["features"]["test"]
 
@@ -1223,10 +1257,10 @@ class TestFeatures:
         ),
     )
     def test_features_are_a_property_of_uaconfig(
-        self, cfg_features, expected, warnings, caplog_text
+        self, cfg_features, expected, warnings, caplog_text, FakeConfig
     ):
         user_cfg = {"features": cfg_features}
-        cfg = UAConfig(cfg=user_cfg)
+        cfg = FakeConfig(cfg_overrides=user_cfg)
         assert expected == cfg.features
         if warnings:
             assert warnings in caplog_text()
@@ -1280,16 +1314,16 @@ class TestMachineTokenOverlay:
         },
     }
 
-    @mock.patch("uaclient.util.load_file")
-    @mock.patch("uaclient.config.UAConfig.read_cache")
+    @mock.patch("uaclient.system.load_file")
+    @mock.patch("uaclient.files.MachineTokenFile.read")
     @mock.patch("uaclient.config.os.path.exists", return_value=True)
     def test_machine_token_update_with_overlay(
-        self, m_path, m_read_cache, m_load_file
+        self, m_path, m_token_read, m_load_file, FakeConfig
     ):
         user_cfg = {
             "features": {"machine_token_overlay": "machine-token-path"}
         }
-        m_read_cache.return_value = self.machine_token_dict
+        m_token_read.return_value = self.machine_token_dict
 
         remote_server_overlay = "overlay"
         json_str = json.dumps(
@@ -1329,24 +1363,29 @@ class TestMachineTokenOverlay:
             {"available": True, "name": "test-overlay"}
         )
 
-        cfg = UAConfig(cfg=user_cfg)
+        cfg = FakeConfig(cfg_overrides=user_cfg)
         assert expected == cfg.machine_token
 
-    @mock.patch("uaclient.config.UAConfig.read_cache")
-    def test_machine_token_without_overlay(self, m_read_cache):
+    @mock.patch("uaclient.files.MachineTokenFile.read")
+    @mock.patch("os.getuid", return_value=0)
+    def test_machine_token_without_overlay(
+        self, _m_getuid, m_token_read, FakeConfig
+    ):
         user_cfg = {}
-        m_read_cache.return_value = self.machine_token_dict
-        cfg = UAConfig(cfg=user_cfg)
+        m_token_read.return_value = self.machine_token_dict
+        cfg = FakeConfig(cfg_overrides=user_cfg)
         assert self.machine_token_dict == cfg.machine_token
 
-    @mock.patch("uaclient.config.UAConfig.read_cache")
+    @mock.patch("uaclient.files.MachineTokenFile.read")
     @mock.patch("uaclient.config.os.path.exists", return_value=False)
-    def test_machine_token_overlay_file_not_found(self, m_path, m_read_cache):
+    def test_machine_token_overlay_file_not_found(
+        self, m_path, m_token_read, FakeConfig
+    ):
         invalid_path = "machine-token-path"
         user_cfg = {"features": {"machine_token_overlay": invalid_path}}
-        m_read_cache.return_value = self.machine_token_dict
+        m_token_read.return_value = self.machine_token_dict
 
-        cfg = UAConfig(cfg=user_cfg)
+        cfg = FakeConfig(cfg_overrides=user_cfg)
         expected_msg = messages.INVALID_PATH_FOR_MACHINE_TOKEN_OVERLAY.format(
             file_path=invalid_path
         )
@@ -1356,15 +1395,15 @@ class TestMachineTokenOverlay:
 
         assert expected_msg == str(excinfo.value)
 
-    @mock.patch("uaclient.util.load_file")
-    @mock.patch("uaclient.config.UAConfig.read_cache")
+    @mock.patch("uaclient.system.load_file")
+    @mock.patch("uaclient.files.MachineTokenFile.read")
     @mock.patch("uaclient.config.os.path.exists", return_value=True)
     def test_machine_token_overlay_json_decode_error(
-        self, m_path, m_read_cache, m_load_file
+        self, m_path, m_token_read, m_load_file, FakeConfig
     ):
         invalid_json_path = "machine-token-path"
         user_cfg = {"features": {"machine_token_overlay": invalid_json_path}}
-        m_read_cache.return_value = self.machine_token_dict
+        m_token_read.return_value = self.machine_token_dict
 
         json_str = '{"directives": {"remoteServer": "overlay"}'
         m_load_file.return_value = json_str
@@ -1373,7 +1412,7 @@ class TestMachineTokenOverlay:
             file_path=invalid_json_path,
         )
 
-        cfg = UAConfig(cfg=user_cfg)
+        cfg = FakeConfig(cfg_overrides=user_cfg)
         with pytest.raises(exceptions.UserFacingError) as excinfo:
             cfg.machine_token
 

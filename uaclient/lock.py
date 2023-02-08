@@ -4,8 +4,10 @@ import os
 import time
 
 from uaclient import config, exceptions
+from uaclient.files import notices
+from uaclient.files.notices import Notice
 
-LOG = logging.getLogger("ua.lock")
+LOG = logging.getLogger("pro.lock")
 
 # Set a module-level callable here so we don't have to reinstantiate
 # UAConfig in order to determine dynamic data_path exception handling of
@@ -47,8 +49,11 @@ class SingleAttemptLock:
         self.cfg.write_cache(
             "lock", "{}:{}".format(os.getpid(), self.lock_holder)
         )
-        notice_msg = "Operation in progress: {}".format(self.lock_holder)
-        self.cfg.add_notice("", notice_msg)
+        notices.add(
+            self.cfg.root_mode,
+            Notice.OPERATION_IN_PROGRESS,
+            operation=self.lock_holder,
+        )
         clear_lock_file = functools.partial(self.cfg.delete_cache_key, "lock")
 
     def __exit__(self, _exc_type, _exc_value, _traceback):

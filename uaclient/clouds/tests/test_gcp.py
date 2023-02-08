@@ -30,7 +30,9 @@ class TestUAAutoAttachGCPInstance:
         instance = UAAutoAttachGCPInstance()
         assert {"identityToken": "attestedWOOT!==="} == instance.identity_doc
         assert [
-            mock.call(TOKEN_URL, headers={"Metadata-Flavor": "Google"})
+            mock.call(
+                TOKEN_URL, headers={"Metadata-Flavor": "Google"}, timeout=1
+            )
         ] == readurl.call_args_list
 
     @pytest.mark.parametrize("caplog_text", [logging.DEBUG], indirect=True)
@@ -42,7 +44,7 @@ class TestUAAutoAttachGCPInstance:
     ):
         """Retries backoff before failing to get GCP.identity_doc"""
 
-        def fake_someurlerrors(url, headers):
+        def fake_someurlerrors(url, headers, timeout):
             if readurl.call_count <= fail_count:
                 raise HTTPError(
                     "http://me",
@@ -66,7 +68,7 @@ class TestUAAutoAttachGCPInstance:
                 "identityToken": "attestedWOOT!==="
             } == instance.identity_doc
 
-        expected_sleep_calls = [mock.call(1), mock.call(2), mock.call(5)]
+        expected_sleep_calls = [mock.call(0.5), mock.call(1), mock.call(1)]
         assert expected_sleep_calls == sleep.call_args_list
 
         expected_logs = [
@@ -90,7 +92,7 @@ class TestUAAutoAttachGCPInstance:
         ),
     )
     @mock.patch(M_PATH + "os.path.exists")
-    @mock.patch(M_PATH + "util.load_file")
+    @mock.patch(M_PATH + "system.load_file")
     def test_is_viable_based_on_dmi_product_name(
         self, load_file, m_exists, product_name, viable
     ):
@@ -240,7 +242,7 @@ class TestUAAutoAttachGCPInstance:
             ),
         ),
     )
-    @mock.patch(M_PATH + "util.get_platform_info")
+    @mock.patch(M_PATH + "system.get_platform_info")
     @mock.patch(M_PATH + "util.readurl")
     def test_is_license_present(
         self,
@@ -274,11 +276,11 @@ class TestUAAutoAttachGCPInstance:
             ({"series": "xenial"}, True),
             ({"series": "bionic"}, True),
             ({"series": "focal"}, True),
-            ({"series": "impish"}, False),
+            ({"series": "non_lts"}, False),
             ({"series": "jammy"}, True),
         ),
     )
-    @mock.patch(M_PATH + "util.get_platform_info")
+    @mock.patch(M_PATH + "system.get_platform_info")
     def test_should_poll_for_license(
         self, m_get_platform_info, platform_info, expected_result
     ):

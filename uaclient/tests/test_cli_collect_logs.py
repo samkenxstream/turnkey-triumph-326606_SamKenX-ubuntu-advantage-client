@@ -10,15 +10,14 @@ from uaclient.cli import (
     get_parser,
     main,
 )
-from uaclient.exceptions import NonRootUserError
 
 M_PATH = "uaclient.cli."
 
 HELP_OUTPUT = textwrap.dedent(
     """\
-usage: ua collect-logs \[flags\]
+usage: pro collect-logs \[flags\]
 
-Collect UA logs and relevant system information into a tarball.
+Collect logs and relevant system information into a tarball.
 
 (optional arguments|options):
   -h, --help            show this help message and exit
@@ -29,45 +28,49 @@ Collect UA logs and relevant system information into a tarball.
 )
 
 
-@mock.patch(M_PATH + "os.getuid")
-def test_non_root_users_are_rejected(getuid, FakeConfig):
-    """Check that a UID != 0 will receive a message and exit non-zero"""
-    getuid.return_value = 1
-
-    cfg = FakeConfig()
-    with pytest.raises(NonRootUserError):
-        action_collect_logs(mock.MagicMock(), cfg=cfg)
-
-
 @mock.patch(M_PATH + "os.getuid", return_value=0)
 class TestActionCollectLogs:
     @mock.patch(M_PATH + "contract.get_available_resources")
-    def test_collect_logs_help(self, _m_resources, _getuid, capsys):
+    def test_collect_logs_help(
+        self, _m_resources, _getuid, capsys, FakeConfig
+    ):
         with pytest.raises(SystemExit):
             with mock.patch(
                 "sys.argv", ["/usr/bin/ua", "collect-logs", "--help"]
             ):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
         out, _err = capsys.readouterr()
         assert re.match(HELP_OUTPUT, out)
 
-    @mock.patch(M_PATH + "tarfile.open")
+    @mock.patch(
+        "glob.glob",
+        return_value=[
+            "/var/log/ubuntu-advantage.log",
+            "/var/log/ubuntu-advantage.log.1",
+        ],
+    )
+    @mock.patch("tarfile.open")
     @mock.patch("builtins.open")
     @mock.patch(M_PATH + "util.redact_sensitive_logs", return_value="test")
     # let's pretend all files exist
     @mock.patch(M_PATH + "os.path.isfile", return_value=True)
-    @mock.patch(M_PATH + "util.write_file")
-    @mock.patch(M_PATH + "shutil.copy")
-    @mock.patch(M_PATH + "util.subp", return_value=(None, None))
+    @mock.patch("uaclient.system.write_file")
+    @mock.patch("uaclient.system.load_file")
+    @mock.patch("uaclient.system.subp", return_value=(None, None))
     def test_collect_logs(
         self,
         m_subp,
-        m_copy,
+        _load_file,
         _write_file,
-        _isfile,
+        m_isfile,
         redact,
         _fopen,
         _tarfile,
+        _glob,
         _getuid,
         FakeConfig,
     ):
@@ -76,7 +79,7 @@ class TestActionCollectLogs:
 
         assert m_subp.call_args_list == [
             mock.call(["cloud-id"], rcs=None),
-            mock.call(["ua", "status", "--format", "json"], rcs=None),
+            mock.call(["pro", "status", "--format", "json"], rcs=None),
             mock.call(["/snap/bin/canonical-livepatch", "status"], rcs=None),
             mock.call(["systemctl", "list-timers", "--all"], rcs=None),
             mock.call(
@@ -118,8 +121,27 @@ class TestActionCollectLogs:
             ),
         ]
 
-        assert m_copy.call_count == 15
-        assert redact.call_count == 15
+        assert m_isfile.call_count == 17
+        assert m_isfile.call_args_list == [
+            mock.call("/etc/ubuntu-advantage/uaclient.conf"),
+            mock.call("/var/log/ubuntu-advantage.log"),
+            mock.call("/var/log/ubuntu-advantage-timer.log"),
+            mock.call("/var/log/ubuntu-advantage-daemon.log"),
+            mock.call("/var/lib/ubuntu-advantage/jobs-status.json"),
+            mock.call("/etc/cloud/build.info"),
+            mock.call("/etc/apt/sources.list.d/ubuntu-cc-eal.list"),
+            mock.call("/etc/apt/sources.list.d/ubuntu-cis.list"),
+            mock.call("/etc/apt/sources.list.d/ubuntu-esm-apps.list"),
+            mock.call("/etc/apt/sources.list.d/ubuntu-esm-infra.list"),
+            mock.call("/etc/apt/sources.list.d/ubuntu-fips.list"),
+            mock.call("/etc/apt/sources.list.d/ubuntu-fips-updates.list"),
+            mock.call("/etc/apt/sources.list.d/ubuntu-realtime-kernel.list"),
+            mock.call("/etc/apt/sources.list.d/ubuntu-ros.list"),
+            mock.call("/etc/apt/sources.list.d/ubuntu-ros-updates.list"),
+            mock.call("/var/log/ubuntu-advantage.log"),
+            mock.call("/var/log/ubuntu-advantage.log.1"),
+        ]
+        assert redact.call_count == 17
 
 
 class TestParser:
@@ -129,11 +151,11 @@ class TestParser:
     ):
         """Update the parser configuration for 'collect-logs'."""
         m_parser = collect_logs_parser(mock.Mock())
-        assert "ua collect-logs [flags]" == m_parser.usage
+        assert "pro collect-logs [flags]" == m_parser.usage
         assert "collect-logs" == m_parser.prog
 
         full_parser = get_parser(FakeConfig())
-        with mock.patch("sys.argv", ["ua", "collect-logs"]):
+        with mock.patch("sys.argv", ["pro", "collect-logs"]):
             args = full_parser.parse_args()
         assert "collect-logs" == args.command
         assert "action_collect_logs" == args.action.__name__

@@ -1,14 +1,19 @@
 import logging
 import os
-import re
 from itertools import groupby
 from typing import List, Optional, Tuple  # noqa: F401
 
-from uaclient import apt, event_logger, exceptions, messages, util
+from uaclient import apt, event_logger, exceptions, messages, system, util
 from uaclient.clouds.identity import NoCloudTypeReason, get_cloud_type
 from uaclient.entitlements import repo
 from uaclient.entitlements.base import IncompatibleService
 from uaclient.entitlements.entitlement_status import ApplicationStatus
+from uaclient.files import notices
+from uaclient.files.notices import Notice
+from uaclient.files.state_files import (
+    ServicesOnceEnabledData,
+    services_once_enabled_file,
+)
 from uaclient.types import (  # noqa: F401
     MessagingOperations,
     MessagingOperationsDict,
@@ -121,16 +126,16 @@ class FIPSCommonEntitlement(repo.RepoEntitlement):
         2. Install the corresponding hmac version of that package
            when available.
         """
-        series = util.get_platform_info().get("series", "")
+        series = system.get_platform_info().get("series", "")
 
-        if util.is_container():
+        if system.is_container():
             return FIPS_CONTAINER_CONDITIONAL_PACKAGES.get(series, [])
 
         return FIPS_CONDITIONAL_PACKAGES.get(series, [])
 
     def install_packages(
         self,
-        package_list: List[str] = None,
+        package_list: Optional[List[str]] = None,
         cleanup_on_failure: bool = True,
         verbose: bool = True,
     ) -> None:
@@ -155,7 +160,7 @@ class FIPSCommonEntitlement(repo.RepoEntitlement):
         # Any conditional packages should still be installed, but if
         # they fail to install we should not block the enable operation.
         desired_packages = []  # type: List[str]
-        installed_packages = apt.get_installed_packages()
+        installed_packages = apt.get_installed_packages_names()
         pkg_groups = groupby(
             sorted(self.conditional_packages),
             key=lambda pkg_name: pkg_name.replace("-hmac", ""),
@@ -185,7 +190,7 @@ class FIPSCommonEntitlement(repo.RepoEntitlement):
         @param operation: The operation being executed.
         @param silent: Boolean set True to silence print/log of messages
         """
-        reboot_required = util.should_reboot()
+        reboot_required = system.should_reboot()
         event.needs_reboot(reboot_required)
         if reboot_required:
             if not silent:
@@ -195,11 +200,15 @@ class FIPSCommonEntitlement(repo.RepoEntitlement):
                     )
                 )
             if operation == "install":
-                self.cfg.add_notice(
-                    "", messages.FIPS_SYSTEM_REBOOT_REQUIRED.msg
+                notices.add(
+                    self.cfg.root_mode,
+                    Notice.FIPS_SYSTEM_REBOOT_REQUIRED,
                 )
             elif operation == "disable operation":
-                self.cfg.add_notice("", messages.FIPS_DISABLE_REBOOT_REQUIRED)
+                notices.add(
+                    self.cfg.root_mode,
+                    Notice.FIPS_DISABLE_REBOOT_REQUIRED,
+                )
 
     def _allow_fips_on_cloud_instance(
         self, series: str, cloud_id: str
@@ -239,7 +248,7 @@ class FIPSCommonEntitlement(repo.RepoEntitlement):
         if cloud_id is None:
             cloud_id = ""
 
-        series = util.get_platform_info().get("series", "")
+        series = system.get_platform_info().get("series", "")
         blocked_message = messages.FIPS_BLOCK_ON_CLOUD.format(
             series=series.title(), cloud=cloud_titles.get(cloud_id)
         )
@@ -251,81 +260,44 @@ class FIPSCommonEntitlement(repo.RepoEntitlement):
             ),
         )
 
-    def _replace_metapackage_on_cloud_instance(
-        self, packages: List[str]
-    ) -> List[str]:
-        """
-        Identify correct metapackage to be used if in a cloud instance.
-
-        Currently, the contract backend is not delivering the right
-        metapackage on a Bionic Azure or AWS cloud instance. For those
-        clouds, we have cloud specific fips metapackages and we should
-        use them. We are now performing that correction here, but this
-        is a temporary fix.
-        """
-        cfg_disable_fips_metapackage_override = util.is_config_value_true(
-            config=self.cfg.cfg,
-            path_to_value="features.disable_fips_metapackage_override",
-        )
-
-        if cfg_disable_fips_metapackage_override:
-            return packages
-
-        series = util.get_platform_info().get("series")
-        if series not in ("bionic", "focal"):
-            return packages
-
-        cloud_id, _ = get_cloud_type()
-        if cloud_id is None:
-            cloud_id = ""
-
-        cloud_match = re.match(r"^(?P<cloud>(azure|aws|gce)).*", cloud_id)
-        cloud_id = cloud_match.group("cloud") if cloud_match else ""
-
-        if cloud_id not in ("azure", "aws", "gce"):
-            return packages
-
-        cloud_id = "gcp" if cloud_id == "gce" else cloud_id
-        cloud_metapkg = "ubuntu-{}-fips".format(cloud_id)
-        # Replace only the ubuntu-fips meta package if exists
-        return [
-            cloud_metapkg if pkg == "ubuntu-fips" else pkg for pkg in packages
-        ]
-
     @property
     def packages(self) -> List[str]:
-        if util.is_container():
+        if system.is_container():
             return []
-        packages = super().packages
-        return self._replace_metapackage_on_cloud_instance(packages)
+        return super().packages
 
     def application_status(
         self,
     ) -> Tuple[ApplicationStatus, Optional[messages.NamedMessage]]:
         super_status, super_msg = super().application_status()
 
-        if util.is_container() and not util.should_reboot():
-            self.cfg.remove_notice(
-                "", messages.FIPS_SYSTEM_REBOOT_REQUIRED.msg
+        if system.is_container() and not system.should_reboot():
+            notices.remove(
+                self.cfg.root_mode,
+                Notice.FIPS_SYSTEM_REBOOT_REQUIRED,
             )
             return super_status, super_msg
 
         if os.path.exists(self.FIPS_PROC_FILE):
-            self.cfg.remove_notice(
-                "", messages.FIPS_SYSTEM_REBOOT_REQUIRED.msg
-            )
-            self.cfg.remove_notice("", messages.FIPS_REBOOT_REQUIRED_MSG)
-            if util.load_file(self.FIPS_PROC_FILE).strip() == "1":
-                self.cfg.remove_notice(
-                    "", messages.NOTICE_FIPS_MANUAL_DISABLE_URL
+
+            # We are now only removing the notice if there is no reboot
+            # required information regarding the fips metapackage we install.
+            if not system.should_reboot(set(self.packages)):
+                notices.remove(
+                    self.cfg.root_mode,
+                    Notice.FIPS_SYSTEM_REBOOT_REQUIRED,
+                )
+
+            if system.load_file(self.FIPS_PROC_FILE).strip() == "1":
+                notices.remove(
+                    self.cfg.root_mode,
+                    Notice.FIPS_MANUAL_DISABLE_URL,
                 )
                 return super_status, super_msg
             else:
-                self.cfg.remove_notice(
-                    "", messages.FIPS_DISABLE_REBOOT_REQUIRED
-                )
-                self.cfg.add_notice(
-                    "", messages.NOTICE_FIPS_MANUAL_DISABLE_URL
+                notices.add(
+                    self.cfg.root_mode,
+                    Notice.FIPS_MANUAL_DISABLE_URL,
                 )
                 return (
                     ApplicationStatus.DISABLED,
@@ -333,8 +305,6 @@ class FIPSCommonEntitlement(repo.RepoEntitlement):
                         file_name=self.FIPS_PROC_FILE
                     ),
                 )
-        else:
-            self.cfg.remove_notice("", messages.FIPS_DISABLE_REBOOT_REQUIRED)
 
         if super_status != ApplicationStatus.ENABLED:
             return super_status, super_msg
@@ -349,7 +319,7 @@ class FIPSCommonEntitlement(repo.RepoEntitlement):
         FIPS meta-package will unset grub config options which will deactivate
         FIPS on any related packages.
         """
-        installed_packages = set(apt.get_installed_packages())
+        installed_packages = set(apt.get_installed_packages_names())
         fips_metapackage = set(self.packages).difference(
             set(self.conditional_packages)
         )
@@ -370,10 +340,11 @@ class FIPSCommonEntitlement(repo.RepoEntitlement):
 
     def _perform_enable(self, silent: bool = False) -> bool:
         if super()._perform_enable(silent=silent):
-            self.cfg.remove_notice(
-                "", messages.NOTICE_WRONG_FIPS_METAPACKAGE_ON_CLOUD
+            notices.remove(
+                self.cfg.root_mode,
+                Notice.WRONG_FIPS_METAPACKAGE_ON_CLOUD,
             )
-            self.cfg.remove_notice("", messages.FIPS_REBOOT_REQUIRED_MSG)
+            notices.remove(self.cfg.root_mode, Notice.FIPS_REBOOT_REQUIRED)
             return True
 
         return False
@@ -428,30 +399,30 @@ class FIPSEntitlement(FIPSCommonEntitlement):
     def static_affordances(self) -> Tuple[StaticAffordance, ...]:
         static_affordances = super().static_affordances
 
-        fips_update = FIPSUpdatesEntitlement(self.cfg)
+        fips_updates = FIPSUpdatesEntitlement(self.cfg)
         enabled_status = ApplicationStatus.ENABLED
-        is_fips_update_enabled = bool(
-            fips_update.application_status()[0] == enabled_status
+        is_fips_updates_enabled = bool(
+            fips_updates.application_status()[0] == enabled_status
         )
 
-        services_once_enabled = (
-            self.cfg.read_cache("services-once-enabled") or {}
-        )
-        fips_updates_once_enabled = services_once_enabled.get(
-            fips_update.name, False
+        services_once_enabled_obj = services_once_enabled_file.read()
+        fips_updates_once_enabled = (
+            services_once_enabled_obj.fips_updates
+            if services_once_enabled_obj
+            else False
         )
 
         return static_affordances + (
             (
                 messages.FIPS_ERROR_WHEN_FIPS_UPDATES_ENABLED.format(
-                    fips=self.title, fips_updates=fips_update.title
+                    fips=self.title, fips_updates=fips_updates.title
                 ),
-                lambda: is_fips_update_enabled,
+                lambda: is_fips_updates_enabled,
                 False,
             ),
             (
                 messages.FIPS_ERROR_WHEN_FIPS_UPDATES_ONCE_ENABLED.format(
-                    fips=self.title, fips_updates=fips_update.title
+                    fips=self.title, fips_updates=fips_updates.title
                 ),
                 lambda: fips_updates_once_enabled,
                 False,
@@ -461,7 +432,7 @@ class FIPSEntitlement(FIPSCommonEntitlement):
     @property
     def messaging(self) -> MessagingOperationsDict:
         post_enable = None  # type: Optional[MessagingOperations]
-        if util.is_container():
+        if system.is_container():
             pre_enable_prompt = (
                 messages.PROMPT_FIPS_CONTAINER_PRE_ENABLE.format(
                     title=self.title
@@ -498,7 +469,10 @@ class FIPSEntitlement(FIPSCommonEntitlement):
                 "defaulting to generic FIPS package."
             )
         if super()._perform_enable(silent=silent):
-            self.cfg.remove_notice("", messages.FIPS_INSTALL_OUT_OF_DATE)
+            notices.remove(
+                self.cfg.root_mode,
+                Notice.FIPS_INSTALL_OUT_OF_DATE,
+            )
             return True
 
         return False
@@ -528,7 +502,7 @@ class FIPSUpdatesEntitlement(FIPSCommonEntitlement):
     @property
     def messaging(self) -> MessagingOperationsDict:
         post_enable = None  # type: Optional[MessagingOperations]
-        if util.is_container():
+        if system.is_container():
             pre_enable_prompt = (
                 messages.PROMPT_FIPS_CONTAINER_PRE_ENABLE.format(
                     title=self.title
@@ -567,6 +541,9 @@ class FIPSUpdatesEntitlement(FIPSCommonEntitlement):
                 key="services-once-enabled", content=services_once_enabled
             )
 
+            services_once_enabled_file.write(
+                ServicesOnceEnabledData(fips_updates=True)
+            )
             return True
 
         return False

@@ -2,7 +2,7 @@
 
 set -e
 
-. /etc/os-release  # For VERSION_ID and UBUNTU_CODENAME
+. /etc/os-release  # For VERSION_ID
 
 # Needed even if this script doesn't call debconf, see:
 # https://lintian.debian.org/tags/postinst-does-not-load-confmodule.html
@@ -13,22 +13,15 @@ if [ -z "${VERSION_ID}" ]; then
     echo "Warning: missing VERSION_ID in /etc/os-release" >&2
     VERSION_ID="NO-VERSION_ID"
 fi
-if [ -z "${UBUNTU_CODENAME}" ]; then
-    echo "Warning: missing UBUNTU_CODENAME in /etc/os-release" >&2
-    UBUNTU_CODENAME="NO-UBUNTU_CODENAME-$VERSION_ID"
-fi
 
 APT_TRUSTED_KEY_DIR="/etc/apt/trusted.gpg.d"
-UA_KEYRING_DIR="/usr/share/keyrings/"
 
 ESM_INFRA_KEY_TRUSTY="ubuntu-advantage-esm-infra-trusty.gpg"
-ESM_APPS_KEY="ubuntu-advantage-esm-apps.gpg"
 
 APT_SRC_DIR="/etc/apt/sources.list.d"
 APT_PREFERENCES_DIR="/etc/apt/preferences.d"
 ESM_INFRA_OLD_APT_SOURCE_FILE_TRUSTY="$APT_SRC_DIR/ubuntu-esm-infra-trusty.list"
 ESM_INFRA_APT_SOURCE_FILE="$APT_SRC_DIR/ubuntu-esm-infra.list"
-ESM_APPS_APT_SOURCE_FILE="$APT_SRC_DIR/ubuntu-esm-apps.list"
 FIPS_APT_SOURCE_FILE="$APT_SRC_DIR/ubuntu-fips.list"
 
 OLD_CLIENT_FIPS_PPA="private-ppa.launchpad.net/ubuntu-advantage/fips/ubuntu"
@@ -37,14 +30,11 @@ OLD_MESSAGING_TIMER="ua-messaging.timer"
 OLD_MESSAGING_TIMER_MASKED_LOCATION="/etc/systemd/system/timers.target.wants/$OLD_MESSAGING_TIMER"
 OLD_LICENSE_CHECK_PATH="ua-license-check.path"
 OLD_LICENSE_CHECK_PATH_MASKED_LOCATION="/etc/systemd/system/multi-user.target.wants/$OLD_LICENSE_CHECK_PATH"
+XENIAL_CLOUD_ID_SHIM_UNIT_LOCATION="/etc/systemd/system/multi-user.target.wants/ubuntu-advantage-cloud-id-shim.service"
 
 ESM_APT_PREF_FILE_TRUSTY="$APT_PREFERENCES_DIR/ubuntu-esm-trusty"
 ESM_INFRA_OLD_APT_PREF_FILE_TRUSTY="$APT_PREFERENCES_DIR/ubuntu-esm-infra-trusty"
 ESM_INFRA_APT_PREF_FILE="$APT_PREFERENCES_DIR/ubuntu-esm-infra"
-ESM_APPS_APT_PREF_FILE="$APT_PREFERENCES_DIR/ubuntu-esm-apps"
-
-MYARCH="$(dpkg --print-architecture)"
-ESM_SUPPORTED_ARCHS="i386 amd64"
 
 SYSTEMD_WANTS_AUTO_ATTACH_LINK="/etc/systemd/system/multi-user.target.wants/ua-auto-attach.service"
 SYSTEMD_HELPER_ENABLED_AUTO_ATTACH_DSH="/var/lib/systemd/deb-systemd-helper-enabled/ua-auto-attach.service.dsh-also"
@@ -53,6 +43,16 @@ SYSTEMD_HELPER_ENABLED_WANTS_LINK="/var/lib/systemd/deb-systemd-helper-enabled/m
 REBOOT_CMD_MARKER_FILE="/var/lib/ubuntu-advantage/marker-reboot-cmds-required"
 OLD_LICENSE_CHECK_MARKER_FILE="/var/lib/ubuntu-advantage/marker-license-check"
 
+MACHINE_TOKEN_FILE="/var/lib/ubuntu-advantage/private/machine-token.json"
+PUBLIC_MACHINE_TOKEN_FILE="/var/lib/ubuntu-advantage/machine-token.json"
+
+UA_MESSAGES_DIR="/var/lib/ubuntu-advantage/messages"
+APT_ESM_MESSAGE_FILE="$UA_MESSAGES_DIR/apt-pre-invoke-esm-service-status"
+ESM_APPS_APT_MSG_FILES="$UA_MESSAGES_DIR/apt-pre-invoke-no-packages-apps.tmpl $UA_MESSAGES_DIR/apt-pre-invoke-no-packages-apps $UA_MESSAGES_DIR/apt-pre-invoke-packages-apps.tmpl $UA_MESSAGES_DIR/apt-pre-invoke-packages-apps"
+UA_FLAGS_DIR="/var/lib/ubuntu-advantage/flags"
+APT_NEWS_FLAG_FILE="$UA_FLAGS_DIR/show-apt-news"
+
+TMP_CANDIDATE_CACHE_PATH="/tmp/ubuntu-advantage/candidate-version"
 
 # Rename apt config files for ua services removing ubuntu release names
 redact_ubuntu_release_from_ua_apt_filenames() {
@@ -90,48 +90,6 @@ redact_ubuntu_release_from_ua_apt_filenames() {
     done
 }
 
-
-# Ubuntu LTS release all support-esm
-check_is_lts() {
-    release_name=$1
-    ubuntu-distro-info --supported-esm | grep -q "${release_name}"
-}
-
-
-# Check whether this series is under active ESM
-check_is_active_esm() {
-    release_name=$1
-
-    _DAYS_UNTIL_ESM=$(ubuntu-distro-info --series "${release_name}" -yeol)
-    if [ "${_DAYS_UNTIL_ESM}" -lt "1" ]; then
-        return 0
-    fi
-
-    return 1
-}
-
-# Check whether a given service is beta
-check_service_is_beta() {
-    service_name=$1
-    _IS_BETA_SVC=$(/usr/bin/python3 -c "
-from uaclient.config import UAConfig
-from uaclient.entitlements import entitlement_factory
-try:
-    cfg = UAConfig()
-    ent_cls = entitlement_factory(cfg=cfg, name='${service_name}')
-    allow_beta = cfg.features.get('allow_beta', False)
-    print(all([ent_cls.is_beta, not allow_beta]))
-except Exception:
-    print(True)
-")
-if [ "${_IS_BETA_SVC}" = "True" ]; then
-    return 0
-else
-    return 1
-fi
-}
-
-
 # Check cached service status from status.json and return 0 if enabled else 1
 check_service_is_enabled() {
     service_name=$1
@@ -154,7 +112,7 @@ if status:
 }
 
 
-unconfigure_esm() {
+esm_cleanup() {
     if ! check_service_is_enabled esm-infra; then
         rm -f "$APT_TRUSTED_KEY_DIR/ubuntu-esm*gpg"  # Remove previous esm keys
         rm -f "$APT_TRUSTED_KEY_DIR/$ESM_INFRA_KEY_TRUSTY"
@@ -163,70 +121,6 @@ unconfigure_esm() {
         rm -f "$ESM_APT_PREF_FILE_TRUSTY" "$ESM_INFRA_OLD_APT_PREF_FILE_TRUSTY"
         rm -f "$ESM_INFRA_APT_PREF_FILE"
     fi
-    if ! check_service_is_enabled esm-apps; then
-        rm -f "$APT_TRUSTED_KEY_DIR/$ESM_APPS_KEY"
-        rm -f "$ESM_APPS_APT_SOURCE_FILE"
-        rm -f "$ESM_APPS_APT_PREF_FILE"
-    fi
-}
-
-
-# Add visibility to a disabled ESM APT source by installing a GPG key and
-# preferences file to Pin never so packages won't get installed by apt update.
-install_esm_apt_key_and_source() {
-    service=$1 release=$2
-    apt_suite="${release}-${service}";
-    case "${service}" in
-        apps)
-            apt_origin="UbuntuESMApps"
-            apt_pref_file=${ESM_APPS_APT_PREF_FILE};
-            apt_source_file=${ESM_APPS_APT_SOURCE_FILE};
-            apt_key=${ESM_APPS_KEY};
-            ;;
-        infra)
-            apt_origin="UbuntuESM"
-            apt_pref_file=${ESM_INFRA_APT_PREF_FILE};
-            apt_source_file=${ESM_INFRA_APT_SOURCE_FILE};
-            apt_key=${ESM_INFRA_KEY_TRUSTY};
-            ;;
-    esac
-
-    # GPG key setup to avoid apt gpg key warnings
-    if [ ! -f "$APT_TRUSTED_KEY_DIR/$apt_key" ]; then
-        cp $UA_KEYRING_DIR/$apt_key $APT_TRUSTED_KEY_DIR
-    fi
-
-    # If preference file doesn't already exist, we aren't attached.
-    # Setup unauthenticated apt source list file and never-pin preference
-    if [ ! -e "${apt_source_file}" ]; then
-        # Unconfigured repo, so set it up as never-pinned
-        cat > ${apt_source_file} <<EOF
-# Written by ubuntu-advantage-tools
-deb https://esm.ubuntu.com/${service}/ubuntu ${apt_suite}-security main
-# deb-src https://esm.ubuntu.com/${service}/ubuntu ${apt_suite}-security main
-
-deb https://esm.ubuntu.com/${service}/ubuntu ${apt_suite}-updates main
-# deb-src https://esm.ubuntu.com/${service}/ubuntu ${apt_suite}-updates main
-EOF
-
-        # Automatically disable esm sources via apt preferences until enabled
-        cat > "${apt_pref_file}" <<EOF
-# Written by ubuntu-advantage-tools
-Package: *
-Pin: release o=${apt_origin}, n=${release}
-Pin-Priority: never
-EOF
-    fi
-}
-
-configure_esm() {
-    rm -f $APT_TRUSTED_KEY_DIR/ubuntu-esm*gpg  # Remove legacy esm keys
-    if check_is_active_esm "${UBUNTU_CODENAME}"; then
-        install_esm_apt_key_and_source "infra" "$UBUNTU_CODENAME"
-    fi
-    if ! check_service_is_beta esm-apps; then
-        install_esm_apt_key_and_source "apps" "$UBUNTU_CODENAME"
-    fi
 }
 
 
@@ -234,27 +128,26 @@ configure_esm() {
 mark_reboot_for_fips_pro() {
     FIPS_HOLDS=$(apt-mark showholds | grep -E 'fips|libssl1|openssh-client|openssh-server|linux-fips|openssl|strongswan' || exit 0)
     if [ "$FIPS_HOLDS" ]; then
-       mark_reboot_cmds_as_needed FIPS_REBOOT_REQUIRED_MSG
+       mark_reboot_cmds_as_needed FIPS_REBOOT_REQUIRED
     fi
 }
 
 
 add_notice() {
-    msg_name=$1
+    notice_type=$1
     /usr/bin/python3 -c "
-from uaclient.config import UAConfig
-from uaclient.messages import ${msg_name}
-cfg = UAConfig()
-cfg.add_notice(label='', description=${msg_name})
+from uaclient.files import notices
+from uaclient.files.notices import Notice
+notices.add(True, Notice.$notice_type)
 "
 }
 
 mark_reboot_cmds_as_needed() {
-    msg_name=$1
+    notice_type=$1
     if [ ! -f "$REBOOT_CMD_MARKER_FILE" ]; then
       touch $REBOOT_CMD_MARKER_FILE
     fi
-    add_notice "$msg_name"
+    add_notice "$notice_type"
 }
 
 patch_status_json_0_1_for_non_root() {
@@ -289,7 +182,7 @@ notify_wrong_fips_metapackage_on_cloud() {
 
     if echo "$cloud_id" | grep -E -q "^(azure|aws)"; then
       if echo "$fips_installed" | grep -E -q "installed"; then
-        add_notice NOTICE_WRONG_FIPS_METAPACKAGE_ON_CLOUD
+        add_notice WRONG_FIPS_METAPACKAGE_ON_CLOUD
       fi
     fi
 }
@@ -303,7 +196,6 @@ disable_new_timer_if_old_timer_already_disabled() {
     # then we will assume that the user would want the
     # ua-timer to be disabled as well. In that case, we will
     # disable the ua-timer here.
-    PREVIOUS_PKG_VER=$1
 
     # We should only perform this check on UA version that have the
     # ua-messaging.timer: 27.0 until 27.2. This will also guarantee
@@ -329,7 +221,7 @@ disable_new_timer_if_old_timer_already_disabled() {
     fi
 }
 
-remove_old_systemd_timers() {
+remove_old_systemd_units() {
     # These are the commands that are run when the package is purged.
     # Since we actually want to remove this service from now on
     # we have replicated that behavior here
@@ -352,6 +244,77 @@ remove_old_systemd_timers() {
         fi
         deb-systemd-helper purge ua-license-check.path > /dev/null || true
         deb-systemd-helper unmask ua-license-check.path > /dev/null || true
+    fi
+
+    # If we're do-release-upgrad-ing to bionic, then clean up the xenial-only
+    # cloud-id-shim unit
+    if [ "$VERSION_ID" = "18.04" ]; then
+        if echo "$PREVIOUS_PKG_VER" | grep -q "16.04"; then
+            if [ -L $XENIAL_CLOUD_ID_SHIM_UNIT_LOCATION ]; then
+                deb-systemd-helper purge ubuntu-advantage-cloud-id-shim.service > /dev/null || true
+                deb-systemd-helper unmask ubuntu-advantage-cloud-id-shim.service > /dev/null || true
+            fi
+        fi
+    fi
+}
+
+create_public_machine_token_file() {
+    # When we perform the write operation through
+    # MachineTokenFile we already write the public
+    # version of the machine-token file with all the
+    # sensitive data removed.
+    /usr/bin/python3 -c "
+from uaclient.files import MachineTokenFile
+machine_token_file = MachineTokenFile()
+content = machine_token_file.read()
+machine_token_file.write(content)
+"
+}
+
+migrate_ubuntu_pro_beta_banner() {
+    # This only shipped in 27.11.2~
+    if dpkg --compare-versions "$PREVIOUS_PKG_VER" ge "27.11.2~" \
+       && dpkg --compare-versions "$PREVIOUS_PKG_VER" lt "27.11.3~"; then
+        # if the banner was present, remove it and add the new flag file which is configurable
+        if [ -f $APT_ESM_MESSAGE_FILE ]; then
+            if cat $APT_ESM_MESSAGE_FILE | grep -q "Try Ubuntu Pro beta"; then
+                rm -f $APT_ESM_MESSAGE_FILE
+                rm -f $ESM_APPS_APT_MSG_FILES
+                mkdir -p $UA_FLAGS_DIR
+                touch $APT_NEWS_FLAG_FILE
+            fi
+        fi
+    fi
+}
+migrate_old_notices(){
+    notices_file=/var/lib/ubuntu-advantage/notices.json
+    # only run if notices.json is present
+    if [ ! -f $notices_file ];then
+        return
+    fi
+
+    # This migration will happen for pro client versions 27.12 or older that still use notices.json.
+    # Notices are generally short lived, so the chances of an upgrade happening while a
+    # notice is in place is very small.
+    # Despite that we do a simple migration here of the most important notices: reboot required notices.
+    # All notices with "reboot" in them can be safely transformed into a generic reboot required message.
+    # The new message won't include the exact reason for the reboot, but the recommended action is the same.
+    if grep -q -i "reboot" $notices_file; then
+        add_notice REBOOT_REQUIRED
+    fi
+    rm $notices_file
+}
+
+
+cleanup_candidate_version_stamp_permissions() {
+    if [ -f $TMP_CANDIDATE_CACHE_PATH ]; then
+        rm -f $TMP_CANDIDATE_CACHE_PATH
+    fi
+}
+
+cleanup_apt_news_flag_file() {
+    if [ -f $APT_NEWS_FLAG_FILE ]; then
+        rm -f $APT_NEWS_FLAG_FILE
     fi
 }
 
@@ -394,15 +357,6 @@ case "$1" in
       # machine-access cache files no longer present or used since 20.1
       rm -f /var/lib/ubuntu-advantage/private/machine-access-*.json
 
-      if check_is_lts "${UBUNTU_CODENAME}"; then
-        if echo "$ESM_SUPPORTED_ARCHS" | grep -qw "$MYARCH"; then
-          configure_esm
-        else
-          # ESM supported release but unsupported arch
-          unconfigure_esm
-        fi
-      fi
-
       # log files need to be world-readable
       if [ ! -f /var/log/ubuntu-advantage.log ]; then
           touch /var/log/ubuntu-advantage.log
@@ -420,12 +374,47 @@ case "$1" in
         if echo "$PREVIOUS_PKG_VER" | grep -q "14.04"; then
           mark_reboot_cmds_as_needed LIVEPATCH_LTS_REBOOT_REQUIRED
         fi
+        if dpkg --compare-versions "$PREVIOUS_PKG_VER" lt "27.13~"; then
+          # Clean any unauthenticated ESM infra files previously inserted
+          # on Xenial, unless the service is enabled
+          esm_cleanup
+        fi
       fi
       mark_reboot_for_fips_pro
       rm_old_license_check_marker
-      disable_new_timer_if_old_timer_already_disabled $PREVIOUS_PKG_VER
-      remove_old_systemd_timers
+      disable_new_timer_if_old_timer_already_disabled
+      remove_old_systemd_units
       /usr/lib/ubuntu-advantage/cloud-id-shim.sh || true
+
+      # On old version of ubuntu-advantange-tools, we don't have a public
+      # machine_token.json file on attached machines. Since the non-root
+      # status now needs that file, we need to create it during the upgrade
+      if [ -f $MACHINE_TOKEN_FILE ] && [ ! -f $PUBLIC_MACHINE_TOKEN_FILE ]; then
+          create_public_machine_token_file
+      fi
+      migrate_ubuntu_pro_beta_banner
+      cleanup_candidate_version_stamp_permissions
+      if dpkg --compare-versions "$PREVIOUS_PKG_VER" lt "27.13~"; then
+          cleanup_apt_news_flag_file
+          migrate_old_notices
+      fi
+
+      
+      # LP: #2003977
+      # The version gate is open ended, and should be closed when the apt_news
+      # configuration is moved away from a conffile.
+      if dpkg --compare-versions "$2" ge 27.11.3~; then
+          if [ -f /var/lib/ubuntu-advantage/preinst-detected-apt-news-disabled ]; then
+              # The preinst has left us a note to tell us that apt-news was
+              # previously disabled and should be re-disabled, so disable it
+              # and discard the note.
+              pro config set apt_news=false
+              rm /var/lib/ubuntu-advantage/preinst-detected-apt-news-disabled
+          fi
+          # Remove the conffile backup if it exists now that an error unwind is
+          # no longer possible
+          rm -f /etc/ubuntu-advantage/uaclient.conf.preinst-remove
+      fi
       ;;
 esac
 

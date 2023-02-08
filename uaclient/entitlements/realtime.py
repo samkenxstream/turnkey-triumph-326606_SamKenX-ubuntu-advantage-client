@@ -1,9 +1,13 @@
-from typing import Tuple
+from typing import Optional, Tuple  # noqa: F401
 
-from uaclient import event_logger, messages, util
+from uaclient import event_logger, messages, system, util
 from uaclient.entitlements import repo
 from uaclient.entitlements.base import IncompatibleService
-from uaclient.types import MessagingOperationsDict, StaticAffordance
+from uaclient.types import (  # noqa: F401
+    MessagingOperations,
+    MessagingOperationsDict,
+    StaticAffordance,
+)
 
 event = event_logger.get_event_logger()
 
@@ -12,16 +16,16 @@ REALTIME_KERNEL_DOCS_URL = "https://ubuntu.com/realtime-kernel"
 
 class RealtimeKernelEntitlement(repo.RepoEntitlement):
     name = "realtime-kernel"
-    title = "Real-Time Kernel"
-    description = "Beta-version Ubuntu Kernel with PREEMPT_RT patches"
+    title = "Real-time kernel"
+    description = "Ubuntu kernel with PREEMPT_RT patches integrated"
     help_doc_url = REALTIME_KERNEL_DOCS_URL
     repo_key_file = "ubuntu-advantage-realtime-kernel.gpg"
-    is_beta = True
     apt_noninteractive = True
+    supports_access_only = True
 
     def _check_for_reboot(self) -> bool:
         """Check if system needs to be rebooted."""
-        reboot_required = util.should_reboot(
+        reboot_required = system.should_reboot(
             installed_pkgs=set(self.packages),
             installed_pkgs_regex=set(["linux-.*-realtime"]),
         )
@@ -54,7 +58,7 @@ class RealtimeKernelEntitlement(repo.RepoEntitlement):
         return (
             (
                 messages.REALTIME_ERROR_INSTALL_ON_CONTAINER,
-                lambda: util.is_container(),
+                lambda: system.is_container(),
                 False,
             ),
         )
@@ -63,17 +67,20 @@ class RealtimeKernelEntitlement(repo.RepoEntitlement):
     def messaging(
         self,
     ) -> MessagingOperationsDict:
-        return {
-            "pre_enable": [
+        pre_enable = None  # type: Optional[MessagingOperations]
+        if not self.access_only:
+            pre_enable = [
                 (
                     util.prompt_for_confirmation,
                     {
-                        "msg": messages.REALTIME_BETA_PROMPT,
+                        "msg": messages.REALTIME_PROMPT,
                         "assume_yes": self.assume_yes,
                         "default": True,
                     },
                 )
-            ],
+            ]
+        return {
+            "pre_enable": pre_enable,
             "pre_disable": [
                 (
                     util.prompt_for_confirmation,

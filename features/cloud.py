@@ -1,12 +1,11 @@
 import json
 import logging
 import os
-import time
 from typing import List, Optional
 
 import pycloudlib  # type: ignore
 import toml
-import yaml
+from pycloudlib.cloud import ImageType  # type: ignore
 
 DEFAULT_CONFIG_PATH = "~/.config/pycloudlib.toml"
 
@@ -28,7 +27,6 @@ class Cloud:
     """
 
     name = ""
-    pro_ids_path = ""
 
     def __init__(
         self,
@@ -152,18 +150,8 @@ class Cloud:
             inbound_ports=inbound_ports,
         )
         logging.info(
-            "--- {} instance launched: {}. Waiting for ssh access".format(
-                self.name, inst.name
-            )
+            "--- {} instance launched: {}.".format(self.name, inst.name)
         )
-        time.sleep(15)
-        for sleep in (5, 10, 15):
-            try:
-                inst.wait()
-                break
-            except Exception as e:
-                logging.info("--- Retrying instance.wait on {}".format(str(e)))
-
         self._check_cloudinit_status(inst)
         return inst
 
@@ -180,7 +168,7 @@ class Cloud:
         """
         return instance.id
 
-    def locate_image_name(self, series: str) -> str:
+    def locate_image_name(self, series: str, daily: bool = True) -> str:
         """Locate and return the image name to use for vm provision.
 
         :param series:
@@ -195,17 +183,20 @@ class Cloud:
                 "Must provide either series or image_name to launch azure"
             )
 
-        if "pro" in self.machine_type:
-            with open(self.pro_ids_path, "r") as stream:
-                pro_ids = yaml.safe_load(stream.read())
-            if "fips" in self.machine_type:
-                image_name = pro_ids[series + "-fips"]
-            else:
-                image_name = pro_ids[series]
-        else:
-            image_name = self.api.daily_image(release=series)
+        image_type = ImageType.GENERIC
+        if "pro.fips" in self.machine_type:
+            image_type = ImageType.PRO_FIPS
+        elif "pro" in self.machine_type:
+            image_type = ImageType.PRO
 
-        return image_name
+        if daily:
+            logging.debug("looking up daily image for {}".format(series))
+            return self.api.daily_image(release=series, image_type=image_type)
+        else:
+            logging.debug("looking up released image for {}".format(series))
+            return self.api.released_image(
+                release=series, image_type=image_type
+            )
 
     def manage_ssh_key(
         self,
@@ -243,7 +234,6 @@ class EC2(Cloud):
     """Class that represents the EC2 cloud provider."""
 
     name = "aws"
-    pro_ids_path = "features/aws-ids.yaml"
 
     @property
     def pycloudlib_cls(self):
@@ -314,7 +304,14 @@ class EC2(Cloud):
             An AWS cloud provider instance
         """
         if not image_name:
-            image_name = self.locate_image_name(series)
+            if series == "xenial" and "pro" not in self.machine_type:
+                logging.debug(
+                    "defaulting to non-daily image for awsgeneric-16.04"
+                )
+                daily = False
+            else:
+                daily = True
+            image_name = self.locate_image_name(series, daily=daily)
 
         logging.info(
             "--- Launching AWS image {}({})".format(image_name, series)
@@ -334,7 +331,6 @@ class Azure(Cloud):
     """Class that represents the Azure cloud provider."""
 
     name = "Azure"
-    pro_ids_path = "features/azure-ids.yaml"
 
     @property
     def pycloudlib_cls(self):
@@ -439,7 +435,6 @@ class GCP(Cloud):
     """Class that represents the Google Cloud Platform cloud provider."""
 
     name = "gcp"
-    pro_ids_path = "features/gcp-ids.yaml"
     cls_type = pycloudlib.GCE
 
     @property
@@ -622,7 +617,7 @@ class _LXD(Cloud):
         # instead of the instance id
         return instance.name
 
-    def locate_image_name(self, series: str) -> str:
+    def locate_image_name(self, series: str, daily: bool = True) -> str:
         """Locate and return the image name to use for vm provision.
 
         :param series:
@@ -637,7 +632,13 @@ class _LXD(Cloud):
                 "Must provide either series or image_name to launch azure"
             )
 
-        image_name = self.api.daily_image(release=series)
+        if daily:
+            logging.debug("looking up daily image for {}".format(series))
+            image_name = self.api.daily_image(release=series)
+        else:
+            logging.debug("looking up released image for {}".format(series))
+            image_name = self.api.released_image(release=series)
+
         return image_name
 
 

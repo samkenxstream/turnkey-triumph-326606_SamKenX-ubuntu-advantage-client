@@ -6,12 +6,12 @@ from typing import Any, Dict, Optional, Tuple, Type
 from urllib import error
 from urllib.parse import urlencode
 
-from uaclient import config, exceptions, util, version
+from uaclient import config, exceptions, system, util, version
 
 
 class UAServiceClient(metaclass=abc.ABCMeta):
 
-    url_timeout = None  # type: Optional[int]
+    url_timeout = 30  # type: Optional[int]
     # Cached serviceclient_url_responses if provided in uaclient.conf
     # via features: {serviceclient_url_responses: /some/file.json}
     _response_overlay = None  # type: Dict[str, Any]
@@ -30,7 +30,8 @@ class UAServiceClient(metaclass=abc.ABCMeta):
 
     def __init__(self, cfg: Optional[config.UAConfig] = None) -> None:
         if not cfg:
-            self.cfg = config.UAConfig()
+            root_mode = os.getuid() == 0
+            self.cfg = config.UAConfig(root_mode=root_mode)
         else:
             self.cfg = cfg
 
@@ -49,12 +50,15 @@ class UAServiceClient(metaclass=abc.ABCMeta):
         method=None,
         query_params=None,
         potentially_sensitive: bool = True,
+        timeout: Optional[int] = None,
     ):
         path = path.lstrip("/")
         if not headers:
             headers = self.headers()
         if headers.get("content-type") == "application/json" and data:
-            data = json.dumps(data).encode("utf-8")
+            data = json.dumps(data, cls=util.DatetimeAwareJSONEncoder).encode(
+                "utf-8"
+            )
         url = urljoin(getattr(self.cfg, self.cfg_url_base_attr), path)
         fake_response, fake_headers = self._get_fake_responses(url)
         if fake_response:
@@ -65,13 +69,14 @@ class UAServiceClient(metaclass=abc.ABCMeta):
                 k: v for k, v in sorted(query_params.items()) if v is not None
             }
             url += "?" + urlencode(filtered_params)
+        timeout_to_use = timeout if timeout is not None else self.url_timeout
         try:
             response, headers = util.readurl(
                 url=url,
                 data=data,
                 headers=headers,
                 method=method,
-                timeout=self.url_timeout,
+                timeout=timeout_to_use,
                 potentially_sensitive=potentially_sensitive,
             )
         except error.URLError as e:
@@ -124,7 +129,7 @@ class UAServiceClient(metaclass=abc.ABCMeta):
             self._response_overlay = {}
         else:
             self._response_overlay = json.loads(
-                util.load_file(response_overlay_path)
+                system.load_file(response_overlay_path)
             )
         return self._response_overlay.get(url, [])
 
@@ -153,9 +158,17 @@ class UAServiceClient(metaclass=abc.ABCMeta):
             return response["response"], response.get("headers", {})
         # Must be an error
         e = error.URLError(response["response"])
-        raise exceptions.UrlError(
+        url_exception = exceptions.UrlError(
             e,
             code=response["code"],
             headers=response.get("headers", {}),
             url=url,
         )
+
+        if response.get("type") == "contract":
+            raise exceptions.ContractAPIError(
+                url_exception,
+                error_response=response["response"],
+            )
+        else:
+            raise url_exception

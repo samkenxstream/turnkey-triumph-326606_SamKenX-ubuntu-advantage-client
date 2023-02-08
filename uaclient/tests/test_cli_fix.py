@@ -11,7 +11,7 @@ M_PATH = "uaclient.cli."
 
 HELP_OUTPUT = textwrap.dedent(
     """\
-usage: ua fix <CVE-yyyy-nnnn+>|<USN-nnnn-d+> [flags]
+usage: pro fix <CVE-yyyy-nnnn+>|<USN-nnnn-d+> [flags]
 
 Inspect and resolve CVEs and USNs (Ubuntu Security Notices) on this machine.
 
@@ -22,16 +22,23 @@ positional arguments:
 
 Flags:
   -h, --help      show this help message and exit
+  --dry-run       If used, fix will not actually run but will display
+                  everything that will happen on the machine during the
+                  command.
 """
 )
 
 
 class TestActionFix:
     @mock.patch("uaclient.cli.contract.get_available_resources")
-    def test_fix_help(self, _m_resources, capsys):
+    def test_fix_help(self, _m_resources, capsys, FakeConfig):
         with pytest.raises(SystemExit):
             with mock.patch("sys.argv", ["/usr/bin/ua", "fix", "--help"]):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
         out, _err = capsys.readouterr()
         assert HELP_OUTPUT == out
 
@@ -60,12 +67,12 @@ class TestActionFix:
     ):
         """Check that root and non-root will emit attached status"""
         cfg = FakeConfig()
-        args = mock.MagicMock(security_issue=issue)
+        args = mock.MagicMock(security_issue=issue, dry_run=False)
         m_fix_security_issue_id.return_value = FixStatus.SYSTEM_NON_VULNERABLE
         if is_valid:
             assert 0 == action_fix(args, cfg=cfg)
             assert [
-                mock.call(cfg, issue)
+                mock.call(cfg=cfg, issue_id=issue, dry_run=False)
             ] == m_fix_security_issue_id.call_args_list
         else:
             with pytest.raises(exceptions.UserFacingError) as excinfo:
@@ -73,7 +80,7 @@ class TestActionFix:
 
             expected_msg = (
                 'Error: issue "{}" is not recognized.\n'
-                'Usage: "ua fix CVE-yyyy-nnnn" or "ua fix USN-nnnn"'
+                'Usage: "pro fix CVE-yyyy-nnnn" or "pro fix USN-nnnn"'
             ).format(issue)
 
             assert expected_msg == str(excinfo.value)

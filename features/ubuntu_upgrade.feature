@@ -9,13 +9,11 @@ Feature: Upgrade between releases when uaclient is attached
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
         And I run `<before_cmd>` with sudo
-        # update-manager-core requires ua < 28. Our tests that build the package will
-        # generate ua with version 28. We are removing that package here to make sure
-        # do-release-upgrade will be able to run
-        And I run `apt remove update-manager-core -y` with sudo
+        # Local PPAs are prepared and served only when testing with local debs
+        And I prepare the local PPAs to upgrade from `<release>` to `<next_release>`
         And I run `apt-get dist-upgrade --assume-yes` with sudo
         # Some packages upgrade may require a reboot
-        And I reboot the `<release>` machine
+        And I reboot the machine
         And I create the file `/etc/update-manager/release-upgrades.d/ua-test.cfg` with the following
         """
         [Sources]
@@ -23,7 +21,7 @@ Feature: Upgrade between releases when uaclient is attached
         """
         And I run `sed -i 's/Prompt=lts/Prompt=<prompt>/' /etc/update-manager/release-upgrades` with sudo
         And I run `do-release-upgrade <devel_release> --frontend DistUpgradeViewNonInteractive` `with sudo` and stdin `y\n`
-        And I reboot the `<release>` machine
+        And I reboot the machine
         And I run `lsb_release -cs` as non-root
         Then I will see the following on stdout:
         """
@@ -33,27 +31,30 @@ Feature: Upgrade between releases when uaclient is attached
         And I will see the following on stdout:
         """
         """
-        When I run `ua refresh` with sudo
-        When I run `ua status` with sudo
+        When I run `pro refresh` with sudo
+        And I run `pro status --all` with sudo
         Then stdout matches regexp:
         """
-        <service> +yes +<service_status>
+        <service1> +yes +<service1_status>
         """
-        When I run `ua detach --assume-yes` with sudo
+        Then stdout matches regexp:
+        """
+        <service2> +yes +<service2_status>
+        """
+        When I run `pro detach --assume-yes` with sudo
         Then stdout matches regexp:
         """
         This machine is now detached.
         """
 
         Examples: ubuntu release
-        | release | next_release | prompt | devel_release   | service   | service_status | before_cmd    |
-        | xenial  | bionic       | lts    |                 | esm-infra | enabled        | true          |
-        | bionic  | focal        | lts    |                 | esm-infra | enabled        | true          |
-        | bionic  | focal        | lts    |                 | usg       | enabled        | ua enable cis |
-        | focal   | impish       | normal |                 | esm-infra | n/a            | true          |
-        | focal   | jammy        | lts    | --devel-release | esm-infra | enabled        | true          |
-        | impish  | jammy        | lts    |                 | esm-infra | disabled       | true          |
-        | jammy   | kinetic      | normal | --devel-release | esm-infra | n/a            | true          |
+        | release | next_release | prompt | devel_release   | service1  | service1_status | service2 | service2_status | before_cmd     |
+        | xenial  | bionic       | lts    |                 | esm-infra | enabled         | esm-apps | enabled         | true           |
+        | bionic  | focal        | lts    |                 | esm-infra | enabled         | esm-apps | enabled         | true           |
+        | bionic  | focal        | lts    |                 | usg       | enabled         | usg      | enabled         | pro enable cis |
+        | focal   | jammy        | lts    | --devel-release | esm-infra | enabled         | esm-apps | enabled         | true           |
+        | jammy   | kinetic      | normal |                 | esm-infra | n/a             | esm-apps | n/a             | true           |
+        | kinetic | lunar        | normal | --devel-release | esm-infra | n/a             | esm-apps | n/a             | true           |
 
     @slow
     @series.xenial
@@ -63,8 +64,8 @@ Feature: Upgrade between releases when uaclient is attached
         Given a `<release>` machine with ubuntu-advantage-tools installed
         When I attach `contract_token` with sudo
         And I run `apt-get install lsof` with sudo, retrying exit [100]
-        And I run `ua disable livepatch` with sudo
-        And I run `ua enable <fips-service> --assume-yes` with sudo
+        And I run `pro disable livepatch` with sudo
+        And I run `pro enable <fips-service> --assume-yes` with sudo
         Then stdout matches regexp:
         """
         Updating package lists
@@ -72,13 +73,13 @@ Feature: Upgrade between releases when uaclient is attached
         <fips-name> enabled
         A reboot is required to complete install
         """
-        When I run `ua status --all` with sudo
+        When I run `pro status --all` with sudo
         Then stdout matches regexp:
         """
         <fips-service> +yes                enabled
         """
         And I verify that running `apt update` `with sudo` exits `0`
-        When I reboot the `<release>` machine
+        When I reboot the machine
         And  I run `uname -r` as non-root
         Then stdout matches regexp:
         """
@@ -89,16 +90,18 @@ Feature: Upgrade between releases when uaclient is attached
         """
         1
         """
-        When I run `apt-get dist-upgrade -y --allow-downgrades` with sudo
+         # Local PPAs are prepared and served only when testing with local debs
+        When I prepare the local PPAs to upgrade from `<release>` to `<next_release>`
+        And I run `apt-get dist-upgrade -y --allow-downgrades` with sudo
         # A package may need a reboot after running dist-upgrade
-        And I reboot the `<release>` machine
+        And I reboot the machine
         And I create the file `/etc/update-manager/release-upgrades.d/ua-test.cfg` with the following
         """
         [Sources]
         AllowThirdParty=yes
         """
         Then I verify that running `do-release-upgrade --frontend DistUpgradeViewNonInteractive` `with sudo` exits `0`
-        When I reboot the `<release>` machine
+        When I reboot the machine
         And I run `lsb_release -cs` as non-root
         Then I will see the following on stdout:
         """
@@ -108,7 +111,7 @@ Feature: Upgrade between releases when uaclient is attached
         Then I will see the following on stdout:
         """
         """
-        When I run `ua status --all` with sudo
+        When I run `pro status --all` with sudo
         Then stdout matches regexp:
         """
         <fips-service> +yes                enabled

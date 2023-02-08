@@ -4,17 +4,20 @@ Timer used to run all jobs that need to be frequently run on the system
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Optional
 
 from uaclient.cli import setup_logging
 from uaclient.config import UAConfig
+from uaclient.files.state_files import (
+    AllTimerJobsState,
+    TimerJobState,
+    timer_jobs_state_file,
+)
 from uaclient.jobs.metering import metering_enabled_resources
 from uaclient.jobs.update_messaging import update_apt_and_motd_messages
-from uaclient.jobs.update_state import update_status
 
 LOG = logging.getLogger(__name__)
 UPDATE_MESSAGING_INTERVAL = 21600  # 6 hours
-UPDATE_STATUS_INTERVAL = 43200  # 12 hours
 METERING_INTERVAL = 14400  # 4 hours
 
 
@@ -42,6 +45,7 @@ class TimedJob:
             return False
 
         try:
+            LOG.debug("Running job: %s", self.name)
             if self._job_func(cfg=cfg):
                 LOG.debug("Executed job: %s", self.name)
         except Exception as e:
@@ -87,20 +91,46 @@ class MeteringTimedJob(TimedJob):
         again. Since the user can also configure the timer interval for this
         job, we will select the greater value between those two choices.
         """
+        run_interval_seconds = super().run_interval_seconds(cfg)
+
+        if run_interval_seconds == 0:
+            # If the user has disabled the metering job, we should
+            # ignore the activity_ping_interval directive
+            return 0
+
         return max(
-            cfg.activity_ping_interval or 0, super().run_interval_seconds(cfg)
+            cfg.machine_token_file.activity_ping_interval or 0,
+            super().run_interval_seconds(cfg),
         )
 
 
-UACLIENT_JOBS = [
-    TimedJob(
-        "update_messaging",
-        update_apt_and_motd_messages,
-        UPDATE_MESSAGING_INTERVAL,
-    ),
-    TimedJob("update_status", update_status, UPDATE_STATUS_INTERVAL),
-    MeteringTimedJob(metering_enabled_resources, METERING_INTERVAL),
-]
+metering_job = MeteringTimedJob(metering_enabled_resources, METERING_INTERVAL)
+update_message_job = TimedJob(
+    "update_messaging",
+    update_apt_and_motd_messages,
+    UPDATE_MESSAGING_INTERVAL,
+)
+
+
+def run_job(
+    cfg: UAConfig,
+    job: TimedJob,
+    current_time: datetime,
+    job_status: Optional[TimerJobState],
+) -> Optional[TimerJobState]:
+    if job_status:
+        next_run = job_status.next_run
+        if next_run and next_run > current_time:
+            return job_status
+    if job.run(cfg):
+        # Persist last_run and next_run UTC-based times on job success.
+        last_run = current_time
+        next_run = current_time + timedelta(
+            seconds=job.run_interval_seconds(cfg)
+        )
+        job_status = TimerJobState(next_run=next_run, last_run=last_run)
+
+    return job_status
 
 
 def run_jobs(cfg: UAConfig, current_time: datetime):
@@ -109,24 +139,26 @@ def run_jobs(cfg: UAConfig, current_time: datetime):
     Persist jobs-status with calculated next_run values to aid in timer
     state introspection for jobs which have not yet run.
     """
-    jobs_status = cfg.read_cache("jobs-status") or {}
-    for job in UACLIENT_JOBS:
-        if job.name in jobs_status:
-            next_run = jobs_status[job.name]["next_run"]
-            if next_run > current_time:
-                continue  # Skip job as expected next_run hasn't yet passed
-        if job.run(cfg):
-            # Persist last_run and next_run UTC-based times on job success.
-            jobs_status[job.name] = {
-                "last_run": current_time,
-                "next_run": current_time
-                + timedelta(seconds=job.run_interval_seconds(cfg)),
-            }
-    cfg.write_cache(key="jobs-status", content=jobs_status)
+    jobs_status_obj = timer_jobs_state_file.read()
+
+    if jobs_status_obj is None:
+        # We do this for the first run of the timer job, where the file
+        # doesn't exist
+        jobs_status_obj = AllTimerJobsState(
+            metering=None, update_messaging=None
+        )
+
+    jobs_status_obj.metering = run_job(
+        cfg, metering_job, current_time, jobs_status_obj.metering
+    )
+    jobs_status_obj.update_messaging = run_job(
+        cfg, update_message_job, current_time, jobs_status_obj.update_messaging
+    )
+    timer_jobs_state_file.write(jobs_status_obj)
 
 
 if __name__ == "__main__":
-    cfg = UAConfig()
+    cfg = UAConfig(root_mode=True)
     current_time = datetime.now(timezone.utc)
 
     # The ua-timer logger should log everything to its file

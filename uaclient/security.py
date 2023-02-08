@@ -1,5 +1,6 @@
 import copy
 import enum
+import json
 import os
 import socket
 import textwrap
@@ -7,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
-from uaclient import apt, exceptions, messages, serviceclient, util
+from uaclient import apt, exceptions, messages, serviceclient, system, util
 from uaclient.clouds.identity import (
     CLOUD_TYPE_TO_TITLE,
     PRO_CLOUDS,
@@ -20,6 +21,8 @@ from uaclient.entitlements.entitlement_status import (
     ApplicabilityStatus,
     UserFacingStatus,
 )
+from uaclient.files import notices
+from uaclient.files.notices import Notice
 from uaclient.status import colorize_commands
 
 CVE_OR_USN_REGEX = (
@@ -32,8 +35,8 @@ API_V1_NOTICES = "notices.json"
 API_V1_NOTICE_TMPL = "notices/{notice}.json"
 
 UBUNTU_STANDARD_UPDATES_POCKET = "Ubuntu standard updates"
-UA_INFRA_POCKET = "UA Infra"
-UA_APPS_POCKET = "UA Apps"
+UA_INFRA_POCKET = "Ubuntu Pro: ESM Infra"
+UA_APPS_POCKET = "Ubuntu Pro: ESM Apps"
 
 
 ReleasedPackagesInstallResult = NamedTuple(
@@ -225,7 +228,7 @@ class CVEPackageStatus:
 
     @property
     def requires_ua(self) -> bool:
-        """Return True if the package requires an active UA subscription."""
+        """Return True if the package requires an active Pro subscription."""
         return bool(self.pocket_source != UBUNTU_STANDARD_UPDATES_POCKET)
 
     @property
@@ -271,7 +274,7 @@ class CVE:
             break
         lines = [
             "{issue}: {title}".format(issue=self.id, title=title),
-            "https://ubuntu.com/security/{}".format(self.id),
+            " - https://ubuntu.com/security/{}".format(self.id),
         ]
         return "\n".join(lines)
 
@@ -310,7 +313,7 @@ class CVE:
         if hasattr(self, "_packages_status"):
             return self._packages_status  # type: ignore
         self._packages_status = {}
-        series = util.get_platform_info()["series"]
+        series = system.get_platform_info()["series"]
         for package in self.response["packages"]:
             for pkg_status in package["statuses"]:
                 if pkg_status["release_codename"] == series:
@@ -373,11 +376,11 @@ class USN:
         if self.cves_ids:
             lines.append("Found CVEs:")
             for cve in self.cves_ids:
-                lines.append("https://ubuntu.com/security/{}".format(cve))
+                lines.append(" - https://ubuntu.com/security/{}".format(cve))
         elif self.references:
             lines.append("Found Launchpad bugs:")
             for reference in self.references:
-                lines.append(reference)
+                lines.append(" - " + reference)
 
         return "\n".join(lines)
 
@@ -398,7 +401,7 @@ class USN:
         """
         if hasattr(self, "_release_packages"):
             return self._release_packages
-        series = util.get_platform_info()["series"]
+        series = system.get_platform_info()["series"]
         self._release_packages = {}  # type: Dict[str, Dict[str, Any]]
         # Organize source and binary packages under a common source package key
         for pkg in self.response.get("release_packages", {}).get(series, []):
@@ -451,7 +454,7 @@ def query_installed_source_pkg_versions() -> Dict[str, Dict[str, str]]:
     with keys binary_pkg and version.
     """
     status_field = "${db:Status-Status}"
-    out, _err = util.subp(
+    out, _err = system.subp(
         [
             "dpkg-query",
             "-f=${Package},${Source},${Version}," + status_field + "\n",
@@ -514,7 +517,9 @@ def merge_usn_released_binary_package_versions(
                     else:
                         prev_version = usn_src_pkg[bin_pkg]["version"]
                         current_version = binary_pkg_md["version"]
-                        if not version_cmp_le(current_version, prev_version):
+                        if not apt.compare_versions(
+                            current_version, prev_version, "le"
+                        ):
                             # binary_version is greater than prev_version
                             usn_src_pkg[bin_pkg] = binary_pkg_md
     return usn_pkg_versions
@@ -545,7 +550,12 @@ def get_related_usns(usn, client):
     return list(sorted(related_usns.values(), key=lambda x: x.id))
 
 
-def fix_security_issue_id(cfg: UAConfig, issue_id: str) -> FixStatus:
+def fix_security_issue_id(
+    cfg: UAConfig, issue_id: str, dry_run: bool = False
+) -> FixStatus:
+    if dry_run:
+        print(messages.SECURITY_DRY_RUN_WARNING)
+
     issue_id = issue_id.upper()
     client = UASecurityClient(cfg=cfg)
     installed_packages = query_installed_source_pkg_versions()
@@ -557,6 +567,41 @@ def fix_security_issue_id(cfg: UAConfig, issue_id: str) -> FixStatus:
     }
 
     if "CVE" in issue_id:
+        # Check livepatch status for CVE in fixes before checking CVE api
+        status_stdout = None
+        try:
+            status_stdout, _ = system.subp(
+                [
+                    "canonical-livepatch",
+                    "status",
+                    "--verbose",
+                    "--format=json",
+                ]
+            )
+        except exceptions.ProcessExecutionError:
+            pass
+        if status_stdout:
+            try:
+                parsed_patch = json.loads(status_stdout)["Status"][0][
+                    "Livepatch"
+                ]
+
+                if parsed_patch:
+                    fixes = parsed_patch.get("Fixes", [])
+                    if any(
+                        fix["Name"] == issue_id.lower() and fix["Patched"]
+                        for fix in fixes
+                    ):
+                        print(
+                            messages.CVE_FIXED_BY_LIVEPATCH.format(
+                                issue=issue_id,
+                                version=parsed_patch.get("Version", "N/A"),
+                            )
+                        )
+                        return FixStatus.SYSTEM_NON_VULNERABLE
+            except (ValueError, KeyError, IndexError):
+                pass
+
         try:
             cve = client.get_cve(cve_id=issue_id)
             usns = client.get_notices(details=issue_id)
@@ -567,6 +612,7 @@ def fix_security_issue_id(cfg: UAConfig, issue_id: str) -> FixStatus:
                     issue_id=issue_id
                 )
             raise exceptions.UserFacingError(msg)
+
         affected_pkg_status = get_cve_affected_source_packages_status(
             cve=cve, installed_packages=installed_packages
         )
@@ -607,6 +653,7 @@ def fix_security_issue_id(cfg: UAConfig, issue_id: str) -> FixStatus:
         affected_pkg_status=affected_pkg_status,
         installed_packages=installed_packages,
         usn_released_pkgs=usn_released_pkgs,
+        dry_run=dry_run,
     )
 
 
@@ -621,7 +668,9 @@ def get_affected_packages_from_cves(cves, installed_packages):
                 affected_pkgs[pkg_name] = pkg_status
             else:
                 current_ver = affected_pkgs[pkg_name].fixed_version
-                if not version_cmp_le(current_ver, pkg_status.fixed_version):
+                if not apt.compare_versions(
+                    current_ver, pkg_status.fixed_version, "le"
+                ):
                     affected_pkgs[pkg_name] = pkg_status
 
     return affected_pkgs
@@ -699,12 +748,13 @@ def print_affected_packages_header(
     count = len(affected_pkg_status)
     if count == 0:
         print(
-            messages.SECURITY_AFFECTED_PKGS.format(
+            "\n"
+            + messages.SECURITY_AFFECTED_PKGS.format(
                 count="No", plural_str="s are"
             )
             + "."
         )
-        print(messages.SECURITY_ISSUE_UNAFFECTED.format(issue=issue_id))
+        print("\n" + messages.SECURITY_ISSUE_UNAFFECTED.format(issue=issue_id))
         return
 
     if count == 1:
@@ -712,13 +762,21 @@ def print_affected_packages_header(
     else:
         plural_str = "s are"
     msg = (
-        messages.SECURITY_AFFECTED_PKGS.format(
+        "\n"
+        + messages.SECURITY_AFFECTED_PKGS.format(
             count=count, plural_str=plural_str
         )
         + ": "
         + ", ".join(sorted(affected_pkg_status.keys()))
     )
-    print(textwrap.fill(msg, width=PRINT_WRAP_WIDTH, subsequent_indent="    "))
+    print(
+        textwrap.fill(
+            msg,
+            width=PRINT_WRAP_WIDTH,
+            subsequent_indent="    ",
+            replace_whitespace=False,
+        )
+    )
 
 
 def override_usn_release_package_status(
@@ -757,7 +815,7 @@ def override_usn_release_package_status(
 
 
 def group_by_usn_package_status(affected_pkg_status, usn_released_pkgs):
-    status_groups = {}
+    status_groups = {}  # type: Dict[str, List[Tuple[str, CVEPackageStatus]]]
     for src_pkg, pkg_status in sorted(affected_pkg_status.items()):
         usn_released_src = usn_released_pkgs.get(src_pkg, {})
         usn_pkg_status = override_usn_release_package_status(
@@ -829,6 +887,7 @@ def _handle_released_package_fixes(
     binary_pocket_pkgs: Dict[str, List[str]],
     pkg_index: int,
     num_pkgs: int,
+    dry_run: bool,
 ) -> ReleasedPackagesInstallResult:
     """Handle the packages that could be fixed and have a released status.
 
@@ -871,7 +930,10 @@ def _handle_released_package_fixes(
 
                 pkg_index += len(pkg_src_group)
                 upgrade_status &= upgrade_packages_and_attach(
-                    cfg, binary_pkgs, pocket
+                    cfg=cfg,
+                    upgrade_pkgs=binary_pkgs,
+                    pocket=pocket,
+                    dry_run=dry_run,
                 )
 
             if not upgrade_status:
@@ -912,6 +974,7 @@ def prompt_for_affected_packages(
     affected_pkg_status: Dict[str, CVEPackageStatus],
     installed_packages: Dict[str, Dict[str, str]],
     usn_released_pkgs: Dict[str, Dict[str, Dict[str, str]]],
+    dry_run: bool,
 ) -> FixStatus:
     """Process security CVE dict returning a CVEStatus object.
 
@@ -971,7 +1034,7 @@ def prompt_for_affected_packages(
                         )
                     fixed_pkg = usn_released_src[binary_pkg]
                     fixed_version = fixed_pkg["version"]  # type: ignore
-                    if not version_cmp_le(fixed_version, version):
+                    if not apt.compare_versions(fixed_version, version, "le"):
                         binary_pocket_pkgs[pkg_status.pocket_source].append(
                             binary_pkg
                         )
@@ -982,10 +1045,12 @@ def prompt_for_affected_packages(
         binary_pocket_pkgs=binary_pocket_pkgs,
         pkg_index=pkg_index,
         num_pkgs=count,
+        dry_run=dry_run,
     )
 
     unfixed_pkgs += released_pkgs_install_result.unfixed_pkgs
 
+    print()
     if unfixed_pkgs:
         print(_format_unfixed_packages_msg(unfixed_pkgs))
 
@@ -1002,7 +1067,7 @@ def prompt_for_affected_packages(
                 if unfixed_pkgs
                 else FixStatus.SYSTEM_NON_VULNERABLE
             )
-        elif util.should_reboot(
+        elif system.should_reboot(
             installed_pkgs=released_pkgs_install_result.installed_pkgs
         ):
             # we successfully installed some packages, but
@@ -1012,7 +1077,11 @@ def prompt_for_affected_packages(
                 operation="fix operation"
             )
             print(reboot_msg)
-            cfg.add_notice("", reboot_msg)
+            notices.add(
+                cfg.root_mode,
+                Notice.ENABLE_REBOOT_REQUIRED,
+                operation="fix operation",
+            )
             print(
                 util.handle_unicode_characters(
                     messages.SECURITY_ISSUE_NOT_RESOLVED.format(issue=issue_id)
@@ -1038,7 +1107,7 @@ def prompt_for_affected_packages(
 
 
 def _inform_ubuntu_pro_existence_if_applicable() -> None:
-    """Alert the user when running UA on cloud with PRO support."""
+    """Alert the user when running Pro on cloud with PRO support."""
     cloud_type, _ = get_cloud_type()
     if cloud_type in PRO_CLOUDS:
         print(
@@ -1049,7 +1118,7 @@ def _inform_ubuntu_pro_existence_if_applicable() -> None:
 
 
 def _run_ua_attach(cfg: UAConfig, token: str) -> bool:
-    """Attach to a UA subscription with a given token.
+    """Attach to an Ubuntu Pro subscription with a given token.
 
     :return: True if attach performed without errors.
     """
@@ -1057,7 +1126,7 @@ def _run_ua_attach(cfg: UAConfig, token: str) -> bool:
 
     from uaclient import cli
 
-    print(colorize_commands([["ua", "attach", token]]))
+    print(colorize_commands([["pro", "attach", token]]))
     try:
         ret_code = cli.action_attach(
             argparse.Namespace(
@@ -1097,7 +1166,7 @@ def _prompt_for_attach(cfg: UAConfig) -> bool:
 
 
 def _prompt_for_enable(cfg: UAConfig, service: str) -> bool:
-    """Prompt for enable a ua service.
+    """Prompt for enable a pro service.
 
     :return: True if enable performed.
     """
@@ -1112,7 +1181,7 @@ def _prompt_for_enable(cfg: UAConfig, service: str) -> bool:
     )
 
     if choice == "e":
-        print(colorize_commands([["ua", "enable", service]]))
+        print(colorize_commands([["pro", "enable", service]]))
         return bool(
             0
             == cli.action_enable(
@@ -1121,6 +1190,7 @@ def _prompt_for_enable(cfg: UAConfig, service: str) -> bool:
                     assume_yes=True,
                     beta=False,
                     format="cli",
+                    access_only=False,
                 ),
                 cfg,
             )
@@ -1129,10 +1199,20 @@ def _prompt_for_enable(cfg: UAConfig, service: str) -> bool:
     return False
 
 
+def _check_attached(cfg: UAConfig, dry_run: bool) -> bool:
+    """Verify if machine is attached to an Ubuntu Pro subscription."""
+    if dry_run:
+        print("\n" + messages.SECURITY_DRY_RUN_UA_NOT_ATTACHED)
+        return True
+    return _prompt_for_attach(cfg)
+
+
 def _check_subscription_for_required_service(
-    pocket: str, cfg: UAConfig
+    pocket: str, cfg: UAConfig, dry_run: bool
 ) -> bool:
-    """Verify if the ua subscription has the required service enabled."""
+    """
+    Verify if the Ubuntu Pro subscription has the required service enabled.
+    """
     ent = _get_service_for_pocket(pocket, cfg)
 
     if ent:
@@ -1143,6 +1223,15 @@ def _check_subscription_for_required_service(
 
         applicability_status, _ = ent.applicability_status()
         if applicability_status == ApplicabilityStatus.APPLICABLE:
+            if dry_run:
+                print(
+                    "\n"
+                    + messages.SECURITY_DRY_RUN_UA_SERVICE_NOT_ENABLED.format(
+                        service=ent.name
+                    )
+                )
+                return True
+
             if _prompt_for_enable(cfg, ent.name):
                 return True
             else:
@@ -1181,7 +1270,7 @@ def _prompt_for_new_token(cfg: UAConfig) -> bool:
     if choice == "r":
         print(messages.PROMPT_EXPIRED_ENTER_TOKEN)
         token = input("> ")
-        print(colorize_commands([["ua", "detach"]]))
+        print(colorize_commands([["pro", "detach"]]))
         cli.action_detach(
             argparse.Namespace(assume_yes=True, format="cli"), cfg
         )
@@ -1190,46 +1279,63 @@ def _prompt_for_new_token(cfg: UAConfig) -> bool:
     return False
 
 
-def _check_subscription_is_expired(cfg: UAConfig) -> bool:
-    """Check if user UA subscription is expired.
+def _check_subscription_is_expired(
+    status_cache: Dict[str, Any], cfg: UAConfig, dry_run: bool
+) -> bool:
+    """Check if the Ubuntu Pro subscription is expired.
 
     :returns: True if subscription is expired and not renewed.
     """
-    contract_expiry_datetime = cfg.contract_expiry_datetime
+    contract_expiry_datetime = status_cache.get("expires")
+    # If we don't have an expire information on the status-cache, we
+    # can assume that the machine is not attached.
+    if contract_expiry_datetime is None:
+        return False
+
     tzinfo = contract_expiry_datetime.tzinfo
     if contract_expiry_datetime < datetime.now(tzinfo):
+        if dry_run:
+            print(messages.SECURITY_DRY_RUN_UA_EXPIRED_SUBSCRIPTION)
+            return False
         return not _prompt_for_new_token(cfg)
 
     return False
 
 
 def upgrade_packages_and_attach(
-    cfg: UAConfig, upgrade_packages: List[str], pocket: str
+    cfg: UAConfig, upgrade_pkgs: List[str], pocket: str, dry_run: bool
 ) -> bool:
     """Upgrade available packages to fix a CVE.
 
     Upgrade all packages in upgrades_packages and, if necessary,
-    prompt regarding system attach prior to upgrading UA packages.
+    prompt regarding system attach prior to upgrading Ubuntu Pro packages.
 
     :return: True if package upgrade completed or unneeded, False otherwise.
     """
-    if not upgrade_packages:
+    if not upgrade_pkgs:
         return True
 
-    if os.getuid() != 0:
+    # If we are running on --dry-run mode, we don't need to be root
+    # to understand what will happen with the system
+    if os.getuid() != 0 and not dry_run:
         print(messages.SECURITY_APT_NON_ROOT)
         return False
 
     if pocket != UBUNTU_STANDARD_UPDATES_POCKET:
-        if not cfg.is_attached:
-            if not _prompt_for_attach(cfg):
-                return False  # User opted to cancel
-        elif _check_subscription_is_expired(cfg):
-            # UA subscription is expired and the user has not
-            # renewed it
+        # We are now using status-cache because non-root users won't
+        # have access to the private machine_token.json file. We
+        # can use the status-cache as a proxy for the attached
+        # information
+        status_cache = cfg.read_cache("status-cache") or {}
+        if not status_cache.get("attached", False):
+            if not _check_attached(cfg, dry_run):
+                return False
+        elif _check_subscription_is_expired(
+            status_cache=status_cache, cfg=cfg, dry_run=dry_run
+        ):
             return False
 
-        if not _check_subscription_for_required_service(pocket, cfg):
+        if not _check_subscription_for_required_service(pocket, cfg, dry_run):
             # User subscription does not have required service enabled
             return False
 
@@ -1238,23 +1344,17 @@ def upgrade_packages_and_attach(
             [
                 ["apt", "update", "&&"]
                 + ["apt", "install", "--only-upgrade", "-y"]
-                + sorted(upgrade_packages)
+                + sorted(upgrade_pkgs)
             ]
         )
     )
-    apt.run_apt_update_command()
-    apt.run_apt_command(
-        cmd=["apt-get", "install", "--only-upgrade", "-y"] + upgrade_packages,
-        error_msg=messages.APT_INSTALL_FAILED.msg,
-        env={"DEBIAN_FRONTEND": "noninteractive"},
-    )
+
+    if not dry_run:
+        apt.run_apt_update_command()
+        apt.run_apt_command(
+            cmd=["apt-get", "install", "--only-upgrade", "-y"] + upgrade_pkgs,
+            error_msg=messages.APT_INSTALL_FAILED.msg,
+            env={"DEBIAN_FRONTEND": "noninteractive"},
+        )
+
     return True
-
-
-def version_cmp_le(version1: str, version2: str) -> bool:
-    """Return True when version1 is less than or equal to version2."""
-    try:
-        util.subp(["dpkg", "--compare-versions", version1, "le", version2])
-        return True
-    except exceptions.ProcessExecutionError:
-        return False

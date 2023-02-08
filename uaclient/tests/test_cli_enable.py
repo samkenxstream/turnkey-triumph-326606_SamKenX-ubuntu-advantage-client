@@ -6,32 +6,32 @@ import textwrap
 import mock
 import pytest
 
-from uaclient import entitlements, event_logger, exceptions, messages
+from uaclient import defaults, entitlements, event_logger, exceptions, messages
 from uaclient.cli import action_enable, main, main_error_handler
 from uaclient.entitlements.entitlement_status import (
     CanEnableFailure,
     CanEnableFailureReason,
 )
 
-HELP_OUTPUT = textwrap.dedent(
-    """\
-usage: ua enable <service> [<service>] [flags]
+HELP_OUTPUT = """\
+usage: pro enable <service> [<service>] [flags]
 
-Enable an Ubuntu Advantage service.
+Enable an Ubuntu Pro service.
 
 Arguments:
-  service              the name(s) of the Ubuntu Advantage services to enable.
-                       One of: cc-eal, cis, esm-infra, fips, fips-updates,
-                       livepatch
+  service              the name(s) of the Ubuntu Pro services to enable. One
+                       of: cc-eal, cis, esm-apps, esm-infra, fips, fips-
+                       updates, livepatch, realtime-kernel, ros, ros-updates
 
 Flags:
   -h, --help           show this help message and exit
   --assume-yes         do not prompt for confirmation before performing the
                        enable
+  --access-only        do not auto-install packages. Valid for cc-eal, cis and
+                       realtime-kernel.
   --beta               allow beta service to be enabled
   --format {cli,json}  output enable in the specified format (default: cli)
 """
-)
 
 
 @mock.patch("uaclient.cli.os.getuid")
@@ -39,11 +39,20 @@ Flags:
 class TestActionEnable:
     @mock.patch("uaclient.cli.contract.get_available_resources")
     def test_enable_help(
-        self, _m_resources, _getuid, _request_updated_contract, capsys
+        self,
+        _m_resources,
+        _getuid,
+        _request_updated_contract,
+        capsys,
+        FakeConfig,
     ):
         with pytest.raises(SystemExit):
             with mock.patch("sys.argv", ["/usr/bin/ua", "enable", "--help"]):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
         out, _err = capsys.readouterr()
         assert HELP_OUTPUT == out
 
@@ -77,7 +86,11 @@ class TestActionEnable:
                     "json",
                 ],
             ):
-                main()
+                with mock.patch(
+                    "uaclient.config.UAConfig",
+                    return_value=FakeConfig(),
+                ):
+                    main()
 
         expected_message = messages.NONROOT_USER
         expected = {
@@ -98,7 +111,7 @@ class TestActionEnable:
         }
         assert expected == json.loads(capsys.readouterr()[0])
 
-    @mock.patch("uaclient.cli.util.subp")
+    @mock.patch("uaclient.system.subp")
     def test_lock_file_exists(
         self,
         m_subp,
@@ -111,7 +124,7 @@ class TestActionEnable:
         """Check inability to enable if operation holds lock file."""
         getuid.return_value = 0
         cfg = FakeConfig.for_attached_machine()
-        cfg.write_cache("lock", "123:ua disable")
+        cfg.write_cache("lock", "123:pro disable")
         args = mock.MagicMock()
 
         with pytest.raises(exceptions.LockHeldError) as err:
@@ -119,7 +132,7 @@ class TestActionEnable:
         assert [mock.call(["ps", "123"])] == m_subp.call_args_list
 
         expected_message = messages.LOCK_HELD_ERROR.format(
-            lock_request="ua enable", lock_holder="ua disable", pid="123"
+            lock_request="pro enable", lock_holder="pro disable", pid="123"
         )
         assert expected_message.msg == err.value.msg
 
@@ -134,7 +147,7 @@ class TestActionEnable:
                     main_error_handler(action_enable)(args, cfg)
 
         expected_msg = messages.LOCK_HELD_ERROR.format(
-            lock_request="ua enable", lock_holder="lock_holder", pid=1
+            lock_request="pro enable", lock_holder="lock_holder", pid=1
         )
         expected = {
             "_schema_version": event_logger.JSON_SCHEMA_VERSION,
@@ -256,7 +269,7 @@ class TestActionEnable:
             )
         else:
             cfg = FakeConfig()
-            service_msg = "See https://ubuntu.com/advantage"
+            service_msg = "See {}".format(defaults.BASE_UA_URL)
 
         args = mock.MagicMock()
         args.service = ["bogus"]
@@ -391,6 +404,7 @@ class TestActionEnable:
         args.service = ["testitlement"]
         args.assume_yes = assume_yes
         args.beta = False
+        args.access_only = False
 
         with mock.patch(
             "uaclient.entitlements.entitlement_factory",
@@ -404,6 +418,7 @@ class TestActionEnable:
                 assume_yes=assume_yes,
                 allow_beta=False,
                 called_name="testitlement",
+                access_only=False,
             )
         ] == m_entitlement_cls.call_args_list
 
@@ -458,6 +473,7 @@ class TestActionEnable:
         assume_yes = False
         args_mock = mock.Mock()
         args_mock.service = ["ent1", "ent2", "ent3"]
+        args_mock.access_only = False
         args_mock.assume_yes = assume_yes
         args_mock.beta = False
 
@@ -487,6 +503,7 @@ class TestActionEnable:
                     assume_yes=assume_yes,
                     allow_beta=False,
                     called_name=m_ent_cls.name,
+                    access_only=False,
                 )
             ] == m_ent_cls.call_args_list
 
@@ -567,6 +584,7 @@ class TestActionEnable:
         assume_yes = False
         args_mock = mock.Mock()
         args_mock.service = ["ent1", "ent2", "ent3"]
+        args_mock.access_only = False
         args_mock.assume_yes = assume_yes
         args_mock.beta = beta_flag
 
@@ -627,6 +645,7 @@ class TestActionEnable:
                     assume_yes=assume_yes,
                     allow_beta=beta_flag,
                     called_name=m_ent_cls.name,
+                    access_only=False,
                 )
             ] == m_ent_cls.call_args_list
 
@@ -834,6 +853,7 @@ class TestActionEnable:
         cfg = FakeConfig.for_attached_machine()
 
         args_mock = mock.MagicMock()
+        args_mock.access_only = False
         args_mock.assume_yes = False
         args_mock.beta = allow_beta
         args_mock.service = ["testitlement"]
@@ -853,6 +873,7 @@ class TestActionEnable:
                 assume_yes=False,
                 allow_beta=allow_beta,
                 called_name="testitlement",
+                access_only=False,
             )
         ] == m_entitlement_cls.call_args_list
 

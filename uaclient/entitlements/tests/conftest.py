@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from uaclient import config
+from uaclient import config, event_logger
 
 
 def machine_token(
@@ -76,7 +76,7 @@ def machine_access(
 
 
 @pytest.fixture
-def entitlement_factory(tmpdir):
+def entitlement_factory(tmpdir, FakeConfig):
     """
     A pytest fixture that returns a function that instantiates an entitlement
 
@@ -95,10 +95,10 @@ def entitlement_factory(tmpdir):
         entitled: bool = True,
         allow_beta: bool = False,
         called_name: str = "",
+        access_only: bool = False,
         assume_yes: Optional[bool] = None,
         suites: List[str] = None,
         additional_packages: List[str] = None,
-        services_once_enabled: Dict[str, bool] = None,
         cfg: Optional[config.UAConfig] = None,
         cfg_extension: Optional[Dict[str, Any]] = None
     ):
@@ -106,9 +106,8 @@ def entitlement_factory(tmpdir):
             cfg_arg = {"data_dir": tmpdir.strpath}
             if cfg_extension is not None:
                 cfg_arg.update(cfg_extension)
-            cfg = config.UAConfig(cfg=cfg_arg)
-            cfg.write_cache(
-                "machine-token",
+            cfg = FakeConfig(cfg_overrides=cfg_arg)
+            cfg.machine_token_file.write(
                 machine_token(
                     cls.name,
                     affordances=affordances,
@@ -120,12 +119,21 @@ def entitlement_factory(tmpdir):
                 ),
             )
 
-        if services_once_enabled:
-            cfg.write_cache("services-once-enabled", services_once_enabled)
-
-        args = {"allow_beta": allow_beta, "called_name": called_name}
+        args = {
+            "allow_beta": allow_beta,
+            "called_name": called_name,
+            "access_only": access_only,
+        }
         if assume_yes is not None:
             args["assume_yes"] = assume_yes
         return cls(cfg, **args)
 
     return factory_func
+
+
+@pytest.fixture
+def event():
+    event = event_logger.get_event_logger()
+    event.reset()
+
+    return event
